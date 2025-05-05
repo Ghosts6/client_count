@@ -28,3 +28,6 @@ db.sqlite3
 *.log
 log.txt
 Logs/
+
+# Documents
+../doc/

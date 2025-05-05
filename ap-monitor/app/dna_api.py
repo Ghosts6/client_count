@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -22,7 +23,13 @@ ssl_context = ssl._create_unverified_context()
 BASE_URL = os.getenv("DNA_API_URL", "https://dnac11.netops.yorku.ca")
 AUTH_URL = BASE_URL + "/dna/system/api/v1/auth/token"
 SITE_HEALTH_URL = BASE_URL + "/dna/intent/api/v1/site-health"
+DEVICE_HEALTH_URL = BASE_URL + "/dna/intent/api/v1/device-health"
 NETWORK_DEVICE_URL = BASE_URL + "/dna/intent/api/v1/network-device"
+SITE_MEMBERSHIP_URL = BASE_URL + "/dna/intent/api/v1/membership/{siteId}"
+KEELE_CAMPUS_SITE_ID = 'e77b6e96-3cd3-400a-9ebd-231c827fd369'
+
+# Mapping of radio keys to radio IDs
+radio_id_map = {'radio0': 1, 'radio1': 2, 'radio2': 3}
 
 # Authentication credentials
 username = os.getenv("DNA_USERNAME")
@@ -115,16 +122,86 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
     # Filter for Keele Campus buildings
     return [site for site in data if site.get('parentSiteName') == 'Keele Campus']
 
+def fetch_ap_data(auth_manager, rounded_unix_timestamp, retries=3):
+    """
+    Fetch access point data from DNA Center API with detailed information.
+    
+    Args:
+        auth_manager: AuthManager instance for token management
+        rounded_unix_timestamp: Timestamp for the API query
+        retries: Number of retries for failed requests
+        
+    Returns:
+        List of unique AP data with client counts
+    """
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    data = []
+    
+    # Allow time for API to be ready
+    time.sleep(5)  
+    
+    i = 0
+    length = 250  # Initial value to enter the loop
+    
+    while length == 250:  # Continue until we get less than 250 devices (pagination)
+        params = {
+            "deviceRole": "AP", 
+            "siteId": KEELE_CAMPUS_SITE_ID, 
+            "limit": 250, 
+            "offset": (250 * i) + 1,
+            "startTime": rounded_unix_timestamp - 300000,  # 5 minutes before
+            "endTime": rounded_unix_timestamp
+        }
+        
+        query_string = urlencode(params)
+        req = Request(f"{DEVICE_HEALTH_URL}?{query_string}", headers=auth_headers)
+        
+        attempt = 0
+        while attempt < retries:
+            try:
+                with urlopen(req, context=ssl_context, timeout=60) as response:
+                    device_info = json.load(response)
+                    break  # Exit retry loop if successful
+            except (HTTPError, URLError) as e:
+                attempt += 1
+                logger.warning(f"{type(e).__name__} (attempt {attempt}): {e}")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"Failed due to {type(e).__name__} after {retries} attempts: {e}")
+                    raise
+            except Exception as e:
+                attempt += 1
+                logger.warning(f"General error (attempt {attempt}): {e}")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Failed due to general error after {retries} attempts: {e}")
+                    raise
+        
+        response_length = len(device_info["response"])
+        length = response_length  # Update length for loop condition
+        data.extend(device_info["response"])
+        
+        i += 1
+        if response_length == 250:  # If we got the maximum number, there might be more
+            time.sleep(2)  # Avoid API rate limits
+    
+    # Remove duplicates by uuid
+    unique_devices = list({device["uuid"]: device for device in data}.values())
+    return unique_devices
+
 def get_ap_data(auth_manager=None, retries=3):
     """
-    Fetch access point data from DNA Center API.
+    Fetch basic access point data from DNA Center API.
     
     Args:
         auth_manager: Optional AuthManager instance
         retries: Number of retries for failed requests
         
     Returns:
-        List of AP data
+        List of AP data with basic information
     """
     if auth_manager is None:
         auth_manager = AuthManager()
@@ -148,7 +225,10 @@ def get_ap_data(auth_manager=None, retries=3):
                     if "AP" in device.get("type", ""):
                         ap_data.append({
                             "name": device.get("hostname", "Unknown"),
-                            "status": device.get("reachabilityStatus", "Unknown"),
+                            "macAddress": device.get("macAddress", ""),
+                            "ipAddress": device.get("managementIpAddress", ""),
+                            "model": device.get("platformId", "Unknown"),
+                            "reachabilityHealth": device.get("reachabilityStatus", "Unknown"),
                             "clients": device.get("clientCount", 0)
                         })
                 

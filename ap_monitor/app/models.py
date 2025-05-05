@@ -6,18 +6,18 @@ from app.db import Base
 class Building(Base):
     __tablename__ = "buildings"
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False, unique=True)
+    name = Column(String, unique=True, index=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
-    floors = relationship("Floor", back_populates="building")
+    floors = relationship("Floor", back_populates="building", cascade="all, delete-orphan")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class Floor(Base):
     __tablename__ = "floors"
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=False)
+    number = Column(Integer, nullable=False)
+    building_id = Column(Integer, ForeignKey("buildings.id"))
     building = relationship("Building", back_populates="floors")
     access_points = relationship("AccessPoint", back_populates="floor")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -1,7 +1,8 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, Query
+from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,29 +16,25 @@ from app.utils import setup_logging, calculate_next_run_time
 # Set up logging
 logger = setup_logging()
 
-# Create FastAPI application
-app = FastAPI(
-    title="AP Monitor",
-    description="API for monitoring wireless access points and client counts",
-    version="1.0.0",
-)
-
 # Initialize scheduler
 scheduler = BackgroundScheduler()
 
 # Create auth manager for DNA Center API
 auth_manager = AuthManager()
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database and start schedulers on application startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handles app startup and shutdown using the FastAPI lifespan context."""
     try:
+        # === STARTUP ===
+        logger.info("App starting up...")
+
         # Initialize database
         logger.info("Initializing database...")
         init_db()
         logger.info("Database initialized successfully")
-        
-        # Initialize radio table if needed
+
+        # Initialize radio table if empty
         with next(get_db()) as db:
             if db.query(Radio).count() == 0:
                 logger.info("Initializing radio data...")
@@ -49,12 +46,11 @@ async def startup_event():
                 db.add_all(radios)
                 db.commit()
                 logger.info("Radio data initialized successfully")
-        
-        # Calculate next run time for scheduled tasks
+
+        # Schedule tasks
         next_run = calculate_next_run_time()
         logger.info(f"First scheduled run at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Schedule AP data update task
+
         scheduler.add_job(
             func=update_ap_data_task,
             trigger=DateTrigger(run_date=next_run),
@@ -62,8 +58,6 @@ async def startup_event():
             name="Update AP Data Task",
             replace_existing=True,
         )
-        
-        # Schedule client count data update task
         scheduler.add_job(
             func=update_client_count_task,
             trigger=DateTrigger(run_date=next_run),
@@ -71,21 +65,26 @@ async def startup_event():
             name="Update Client Count Task",
             replace_existing=True,
         )
-        
-        # Start the scheduler
+
         scheduler.start()
         logger.info("Scheduler started successfully")
-        
-    except Exception as e:
-        logger.error(f"Error during startup: {e}")
-        raise
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop schedulers on application shutdown."""
-    logger.info("Shutting down scheduler...")
-    scheduler.shutdown()
-    logger.info("Scheduler shut down successfully")
+        yield
+
+    finally:
+        # === SHUTDOWN ===
+        logger.info("App shutting down...")
+        logger.info("Shutting down scheduler...")
+        scheduler.shutdown()
+        logger.info("Scheduler shut down successfully")
+
+# Create FastAPI application with lifespan handler
+app = FastAPI(
+    title="AP Monitor",
+    description="API for monitoring wireless access points and client counts",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 def update_ap_data_task():
     """Background task to update AP data in the database."""

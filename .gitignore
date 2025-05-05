@@ -1,0 +1,44 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+Logs/
+logs/
+*.out
+*.err
+
+# Unit test / coverage
+.cache/
+.pytest_cache/
+coverage.xml
+*.cover
+*.coverage
+htmlcov/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.egg
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+
+# FastAPI generated DB or local DB file (like sqlite)
+db.sqlite3
+*.db
+
+# VSCode and IDE config
+.vscode/
+.idea/
+
+# Log files
+*.log

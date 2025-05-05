@@ -133,64 +133,89 @@ def update_client_count_task():
             
             # Insert client count data
             timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+            count = 0
             
             for site in site_data:
                 building_name = site.get('siteName')
                 campus_name = site.get('parentSiteName')
-                latitude = site.get('latitude')
-                longitude = site.get('longitude')
-                client_count = site.get('numberOfWirelessClients', 0)
+                client_count_data = site.get('clientCount', {})
                 
                 # Get or create building
                 building = db.query(Building).filter_by(name=campus_name).first()
                 if not building:
                     building = Building(name=campus_name)
                     db.add(building)
-                    db.commit()
-                    db.refresh(building)
+                    db.flush()
                 
                 # Get or create floor
                 floor = db.query(Floor).filter_by(name=building_name, building_id=building.id).first()
                 if not floor:
                     floor = Floor(name=building_name, building_id=building.id)
                     db.add(floor)
-                    db.commit()
-                    db.refresh(floor)
+                    db.flush()
                 
-                # Get or create access point
-                ap = db.query(AccessPoint).filter_by(mac_address=site.get('macAddress')).first()
+                # Find or create the access point
+                ap_name = site.get('name', building_name)
+                mac_address = site.get('macAddress', '')
+                
+                ap = None
+                if mac_address:
+                    ap = db.query(AccessPoint).filter_by(mac_address=mac_address).first()
+                
                 if not ap:
                     ap = AccessPoint(
-                        name=site.get('name'),
-                        mac_address=site.get('macAddress'),
-                        ip_address=site.get('ipAddress'),
-                        model_name=site.get('model'),
-                        is_active=1 if site.get('reachabilityHealth') == "UP" else 0,
-                        floor_id=floor.id
+                        name=ap_name,
+                        mac_address=mac_address,
+                        ip_address=site.get('ipAddress', ''),
+                        model_name=site.get('type', 'Unknown'),
+                        is_active=1 if site.get('healthScore', 0) > 0 else 0,
+                        floor_id=floor.id,
+                        clients=site.get('numberOfWirelessClients', 0)
                     )
                     db.add(ap)
-                    db.commit()
-                    db.refresh(ap)
+                    db.flush()
                 
-                # Insert client count
-                for radio, count in site.get('clientCount', {}).items():
+                # Insert client count for each radio
+                for radio, radio_clients in client_count_data.items():
                     radio_id = radio_id_map.get(radio)
                     if radio_id:
-                        db_client_count = ClientCount(
+                        client_count = ClientCount(
                             ap_id=ap.id,
                             radio_id=radio_id,
-                            client_count=count,
+                            client_count=radio_clients,
                             timestamp=timestamp
                         )
-                        db.add(db_client_count)
+                        db.add(client_count)
+                        count += 1
+                
+                # If no radio-specific data, add total client count
+                if not client_count_data and site.get('numberOfWirelessClients', 0) > 0:
+                    client_count = ClientCount(
+                        ap_id=ap.id,
+                        radio_id=1,  # Default to radio0
+                        client_count=site.get('numberOfWirelessClients', 0),
+                        timestamp=timestamp
+                    )
+                    db.add(client_count)
+                    count += 1
             
             db.commit()
-            logger.info(f"Successfully inserted {len(site_data)} client count records")
+            logger.info(f"Successfully inserted {count} client count records")
             
         except Exception as e:
             db.rollback()
             logger.error(f"Error updating client count data: {e}")
-            
+        finally:
+            # Schedule the next run
+            next_run = calculate_next_run_time()
+            scheduler.add_job(
+                func=update_client_count_task,
+                trigger=DateTrigger(run_date=next_run),
+                id="update_client_count_task",
+                name="Update Client Count Task",
+                replace_existing=True,
+            )
+            logger.info(f"Next client count update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")        
             
 @app.get("/", tags=["Health"])
 def read_root():
@@ -245,22 +270,76 @@ def update_client_counts(db: Session = Depends(get_db)):
         
         # Insert client count data
         timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
+        count = 0
         
         for site in site_data:
-            db_client_count = ClientCount(
-                building_name=site.get('siteName'),
-                campus_name=site.get('parentSiteName'),
-                client_count=site.get('numberOfWirelessClients', 0),
-                timestamp=timestamp,
-                latitude=site.get('latitude'),
-                longitude=site.get('longitude')
-            )
-            db.add(db_client_count)
+            building_name = site.get('siteName')
+            campus_name = site.get('parentSiteName')
+            client_count_data = site.get('clientCount', {})
+            
+            # Get or create building
+            building = db.query(Building).filter_by(name=campus_name).first()
+            if not building:
+                building = Building(name=campus_name)
+                db.add(building)
+                db.flush()
+            
+            # Get or create floor
+            floor = db.query(Floor).filter_by(name=building_name, building_id=building.id).first()
+            if not floor:
+                floor = Floor(name=building_name, building_id=building.id)
+                db.add(floor)
+                db.flush()
+            
+            # Find or create the access point
+            ap_name = site.get('name', building_name)
+            mac_address = site.get('macAddress', '')
+            
+            ap = None
+            if mac_address:
+                ap = db.query(AccessPoint).filter_by(mac_address=mac_address).first()
+            
+            if not ap:
+                ap = AccessPoint(
+                    name=ap_name,
+                    mac_address=mac_address,
+                    ip_address=site.get('ipAddress', ''),
+                    model_name=site.get('type', 'Unknown'),
+                    is_active=1 if site.get('healthScore', 0) > 0 else 0,
+                    floor_id=floor.id,
+                    clients=site.get('numberOfWirelessClients', 0)
+                )
+                db.add(ap)
+                db.flush()
+            
+            # Insert client count for each radio
+            for radio, radio_clients in client_count_data.items():
+                radio_id = radio_id_map.get(radio)
+                if radio_id:
+                    client_count = ClientCount(
+                        ap_id=ap.id,
+                        radio_id=radio_id,
+                        client_count=radio_clients,
+                        timestamp=timestamp
+                    )
+                    db.add(client_count)
+                    count += 1
+            
+            # If no radio-specific data, add total client count
+            if not client_count_data and site.get('numberOfWirelessClients', 0) > 0:
+                client_count = ClientCount(
+                    ap_id=ap.id,
+                    radio_id=1,  # Default to radio0
+                    client_count=site.get('numberOfWirelessClients', 0),
+                    timestamp=timestamp
+                )
+                db.add(client_count)
+                count += 1
         
         db.commit()
-        logger.info(f"Successfully inserted {len(site_data)} client count records")
+        logger.info(f"Successfully inserted {count} client count records")
         
-        return {"message": "Client count data updated successfully", "count": len(site_data)}
+        return {"message": "Client count data updated successfully", "count": count}
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Database error in /update-client-counts: {e}")
@@ -309,28 +388,44 @@ def get_client_counts(
     try:
         logger.info(f"Fetching client count data (building={building}, limit={limit})")
         
-        # Build query
-        query = db.query(ClientCount).order_by(ClientCount.timestamp.desc())
+        # Start with base query
+        query = db.query(
+            ClientCount.id,
+            AccessPoint.name.label("ap_name"),
+            Floor.name.label("floor_name"),
+            Building.name.label("building_name"),
+            ClientCount.radio_id,
+            ClientCount.client_count,
+            ClientCount.timestamp
+        ).join(
+            AccessPoint, ClientCount.ap_id == AccessPoint.id
+        ).join(
+            Floor, AccessPoint.floor_id == Floor.id
+        ).join(
+            Building, Floor.building_id == Building.id
+        ).order_by(
+            ClientCount.timestamp.desc()
+        )
         
         # Apply building filter if provided
         if building:
-            query = query.filter(ClientCount.building_name == building)
+            query = query.filter(Building.name == building)
         
         # Apply limit
-        client_counts = query.limit(limit).all()
+        results = query.limit(limit).all()
         
-        logger.info(f"Retrieved {len(client_counts)} client count records")
+        logger.info(f"Retrieved {len(results)} client count records")
         
-        # Convert SQLAlchemy objects to dictionaries
+        # Convert query results to dictionaries
         return [{
-            "id": cc.id,
-            "building_name": cc.building_name,
-            "campus_name": cc.campus_name,
-            "client_count": cc.client_count,
-            "timestamp": cc.timestamp,
-            "latitude": cc.latitude,
-            "longitude": cc.longitude
-        } for cc in client_counts]
+            "id": r.id,
+            "ap_name": r.ap_name,
+            "floor_name": r.floor_name,
+            "building_name": r.building_name,
+            "radio_id": r.radio_id,
+            "client_count": r.client_count,
+            "timestamp": r.timestamp
+        } for r in results]
     except SQLAlchemyError as e:
         logger.error(f"Database error in /client-counts: {e}")
         raise HTTPException(status_code=500, detail="Database error")

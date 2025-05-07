@@ -64,10 +64,15 @@ def load_env_file(file_path=".env"):
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
+                    if "=" not in line:
+                        raise ValueError(f"Invalid line in .env file: {line}")
                     key, value = line.split("=", 1)
                     env_vars[key.strip()] = value.strip()
         return env_vars
     except FileNotFoundError:
         raise FileNotFoundError(f"Error: .env file not found at {file_path}")
+    except ValueError:
+        # propagate invalid-format errors
+        raise
     except Exception as e:
         raise Exception(f"Error parsing .env file: {e}")

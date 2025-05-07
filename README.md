@@ -12,6 +12,7 @@
 - **Scheduler**: Automatically updates data every 5 minutes using APScheduler.
 - **Logging**: Logs application events and errors for debugging and auditing.
 - **Scalable Deployment**: Supports deployment using `systemd` or Docker for portability and reliability.
+- **Testing**: Comprehensive testing of models, APIs, and utility functions using `pytest`.
 
 ---
 
@@ -27,10 +28,16 @@ ap-monitor/
 │   ├── dna_api.py       # Handles communication with Cisco DNA Center API
 │   ├── utils.py         # Utility functions (e.g., logging, scheduling)
 ├── Logs/
-│   └── log.txt          # Application logs
+│   └── ap-monitor.log   # Application logs
+├── tests/
+│   ├── test_models.py   # Tests for database models
+│   ├── test_dna_api.py  # Tests for DNA Center API integration
+│   ├── test_utils.py    # Tests for utility functions
+│   ├── conftest.py      # Test fixtures for database and FastAPI client
 ├── .env                 # Environment variables
 ├── requirements.txt     # Project dependencies
-├── readme.md            # Project documentation
+├── pytest.ini           # Pytest configuration
+├── README.md            # Project documentation
 └── main.py              # Script to start the application
 ```
 
@@ -52,8 +59,8 @@ Ensure the following are installed on the server:
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd ap-monitor
+git clone https://github.com/Ghosts6/client_count
+cd ap_monitor
 ```
 
 ### 2. Configure Environment Variables
@@ -104,7 +111,7 @@ docker build -t ap-monitor .
 Ensure PostgreSQL is running and create the database:
 
 ```bash
-createdb -h localhost -p 5432 -U postgres wireless_count
+createdb -h localhost -p 3306 -U postgres wireless_count
 ```
 
 ---
@@ -193,10 +200,27 @@ docker run -d --name ap-monitor -p 8000:8000 --env-file .env ap-monitor
 Application logs are stored in the `Logs/` directory:
 
 ```
-ap-monitor/Logs/log.txt
+Logs/ap-monitor.log
 ```
 
 Ensure the `Logs/` directory is writable by the application.
+
+---
+
+## **Testing**
+
+The application uses `pytest` for testing. Tests are located in the `tests/` directory and cover the following areas:
+
+- **Models**: Tests for database models (`test_models.py`).
+- **APIs**: Tests for DNA Center API integration (`test_dna_api.py`).
+- **Utilities**: Tests for utility functions like logging and scheduling (`test_utils.py`).
+- **Application Functionality**: Tests for FastAPI endpoints and database interactions.
+
+To run the tests, use the following command:
+
+```bash
+PYTHONPATH=ap_monitor pytest ap_monitor/tests
+```
 
 ---
 

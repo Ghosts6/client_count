@@ -465,16 +465,8 @@ def get_buildings(db: Session = Depends(get_db)):
     """Get list of unique buildings from the client count data."""
     try:
         logger.info("Fetching list of buildings")
-        
-        # Query distinct building names
-        buildings = db.query(ClientCount.building_name).distinct().all()
-        
-        # Extract building names from result tuples
-        building_names = [building[0] for building in buildings]
-        
-        logger.info(f"Retrieved {len(building_names)} buildings")
-        
-        return building_names
+        buildings = db.query(Building.name).distinct().all()
+        return [b[0] for b in buildings]
     except SQLAlchemyError as e:
         logger.error(f"Database error in /buildings: {e}")
         raise HTTPException(status_code=500, detail="Database error")

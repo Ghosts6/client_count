@@ -31,6 +31,8 @@ ap-monitor/
 │   └── ap-monitor.log   # Application logs
 ├── tests/
 │   ├── test_models.py   # Tests for database models
+│   ├── test_main.py     # Tests for main
+│   ├── test_db.py       # Tests for db 
 │   ├── test_dna_api.py  # Tests for DNA Center API integration
 │   ├── test_utils.py    # Tests for utility functions
 │   ├── conftest.py      # Test fixtures for database and FastAPI client

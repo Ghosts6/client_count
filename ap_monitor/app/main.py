@@ -7,14 +7,46 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import os
 
 from app.db import get_db, init_db
 from app.models import AccessPoint, ClientCount, Building, Floor, Room, Radio
 from app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, radio_id_map
 from app.utils import setup_logging, calculate_next_run_time
 
+def get_database_url():
+    if os.getenv("TESTING", "false").lower() == "true":
+        return "sqlite:///:memory:"
+    return "postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}".format(
+        DB_USER=os.getenv("DB_USER", "postgres"),
+        DB_PASSWORD=os.getenv("DB_PASSWORD"),
+        DB_HOST=os.getenv("DB_HOST", "localhost"),
+        DB_PORT=os.getenv("DB_PORT", "3306"),
+        DB_NAME=os.getenv("DB_NAME", "wireless_count")
+    )
+
+# Dynamically determine DATABASE_URL
+DATABASE_URL = get_database_url()
+
+# Initialize database engine and session factory
+engine = None
+TestingSessionLocal = None
+
+def initialize_database():
+    global engine, TestingSessionLocal
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Reinitialize the database engine and session factory
+initialize_database()
+
 # Set up logging
 logger = setup_logging()
+
+# Log the database URL being used
+logger.info(f"Using DATABASE_URL: {DATABASE_URL}")
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
@@ -91,89 +123,68 @@ def update_ap_data_task():
     with next(get_db()) as db:
         try:
             logger.info("Running scheduled task: update_ap_data_task")
-            
+            logger.debug(f"Database session being used: {db}")
+
+
             now = datetime.now()
             rounded_unix_timestamp = int(now.timestamp() * 1000)
-            
+
             # Fetch AP data from DNA Center API with detailed information
             aps = fetch_ap_data(auth_manager, rounded_unix_timestamp)
-            
+
             logger.info(f"Fetched {len(aps)} APs from DNAC API")
-            
+
             # Process each AP
             for ap in aps:
-                # Extract location details
                 location = ap.get('location', '')
                 location_parts = location.split('/')
-                
+
                 if len(location_parts) < 4:
                     logger.warning(f"Skipping device {ap.get('name')} due to invalid location format: {location}")
                     continue
-                
-                # Get building and floor names
+
                 building_name = location_parts[2]
                 floor_name = location_parts[3]
-                room_name = location_parts[4] if len(location_parts) > 4 else None
-                
-                # Get or create building
+
+                logger.debug(f"Processing AP: {ap.get('name')} in Building: {building_name}, Floor: {floor_name}")
+
+                # Handle building
                 building = db.query(Building).filter_by(name=building_name).first()
                 if not building:
-                    building = Building(
-                        name=building_name,
-                        latitude=ap.get('latitude'),
-                        longitude=ap.get('longitude')
-                    )
+                    logger.debug(f"Creating new building: {building_name}")
+                    building = Building(name=building_name, latitude=ap.get('latitude'), longitude=ap.get('longitude'))
                     db.add(building)
                     db.flush()
-                
-                # Get or create floor
-                floor = db.query(Floor).filter_by(name=floor_name, building_id=building.id).first()
+
+                # Handle floor
+                floor = db.query(Floor).filter_by(number=floor_name, building_id=building.id).first()
                 if not floor:
-                    floor = Floor(name=floor_name, building_id=building.id)
+                    logger.debug(f"Creating new floor: {floor_name} for Building: {building_name}")
+                    floor = Floor(number=floor_name, building_id=building.id)
                     db.add(floor)
                     db.flush()
-                
-                # Get or create room if applicable
-                room = None
-                if room_name:
-                    room = db.query(Room).filter_by(name=room_name, floor_id=floor.id).first()
-                    if not room:
-                        room = Room(name=room_name, floor_id=floor.id)
-                        db.add(room)
-                        db.flush()
-                
-                # Check if AP exists by MAC address
-                mac_address = ap.get('macAddress', '')
-                existing_ap = db.query(AccessPoint).filter_by(mac_address=mac_address).first() if mac_address else None
-                
-                is_active = True if ap.get('reachabilityHealth') == "UP" else False
-                
-                if existing_ap:
-                    # Update existing AP
-                    existing_ap.name = ap.get('name', 'Unknown')
-                    existing_ap.ip_address = ap.get('ipAddress', '')
-                    existing_ap.is_active = is_active
-                    existing_ap.floor_id = floor.id
-                    existing_ap.room_id = room.id if room else None
-                    existing_ap.clients = ap.get('clientCount', {}).get('total', 0)
-                    existing_ap.updated_at = now
-                else:
-                    # Create new AP
-                    new_ap = AccessPoint(
-                        name=ap.get('name', 'Unknown'),
-                        mac_address=mac_address,
-                        ip_address=ap.get('ipAddress', ''),
-                        model_name=ap.get('model', 'Unknown'),
-                        is_active=is_active,
+
+                # Handle AP
+                ap_record = db.query(AccessPoint).filter_by(mac_address=ap.get('macAddress')).first()
+                if not ap_record:
+                    logger.debug(f"Creating new AccessPoint: {ap.get('name')} with MAC: {ap.get('macAddress')}")
+                    ap_record = AccessPoint(
+                        name=ap.get('name'),
+                        mac_address=ap.get('macAddress'),
+                        ip_address=ap.get('ipAddress'),
+                        model_name=ap.get('model'),
+                        is_active=True,
                         floor_id=floor.id,
-                        room_id=room.id if room else None,
-                        clients=ap.get('clientCount', {}).get('total', 0)
+                        clients=sum(ap.get('clientCount', {}).values()),
                     )
-                    db.add(new_ap)
-            
+                    db.add(ap_record)
+                else:
+                    logger.debug(f"Updating existing AccessPoint: {ap.get('name')} with new client count")
+                    ap_record.clients = sum(ap.get('clientCount', {}).values())
+
             db.commit()
             logger.info("AP data updated successfully")
-            
+
         except Exception as e:
             db.rollback()
             logger.error(f"Error updating AP data: {e}")
@@ -194,82 +205,54 @@ def update_client_count_task():
     with next(get_db()) as db:
         try:
             logger.info("Running scheduled task: update_client_count_task")
-            
+
             now = datetime.now()
             rounded_unix_timestamp = int(now.timestamp() * 1000)
-            
+
             # Fetch detailed AP data with client count information
             ap_data = fetch_ap_data(auth_manager, rounded_unix_timestamp)
-            
+
             # Also fetch site-level client count data
             site_data = fetch_client_counts(auth_manager, rounded_unix_timestamp)
-            
+
             # Process site-level client count data first (buildings)
             timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
-            
+
             for site in site_data:
-                building_name = site.get('siteName')
-                campus_name = site.get('parentSiteName')
-                client_count_data = site.get('clientCount', {})
-                total_clients = site.get('numberOfWirelessClients', 0)
-                
-                # Get or create building
+                building_name = site.get("parentSiteName")
+                floor_name = site.get("siteName")
+                client_counts = site.get("clientCount", {})
+
                 building = db.query(Building).filter_by(name=building_name).first()
                 if not building:
-                    building = Building(
-                        name=building_name,
-                        latitude=site.get('latitude'),
-                        longitude=site.get('longitude')
-                    )
+                    building = Building(name=building_name, latitude=0.0, longitude=0.0)
                     db.add(building)
                     db.flush()
-                
-                # Process each AP in the site data
-                # This will only handle APs that are directly associated with the site
-                # and have client counts at the site level
-                
-                # For now, we'll just log the site-level client counts
-                logger.info(f"Building {building_name}: {total_clients} clients")
-            
-            # Process AP-level client count data
-            count = 0
-            for device in ap_data:
-                # Skip devices without client count information
-                if 'clientCount' not in device:
-                    continue
-                
-                mac_address = device.get('macAddress')
-                if not mac_address:
-                    logger.warning(f"Skipping device {device.get('name')} without MAC address")
-                    continue
-                
-                # Find the AP in the database
-                ap = db.query(AccessPoint).filter_by(mac_address=mac_address).first()
-                if not ap:
-                    logger.warning(f"AP with MAC {mac_address} not found in database, skipping client count update")
-                    continue
-                
-                # Update overall client count on AP record
-                client_count_dict = device.get('clientCount', {})
-                total_clients = sum(client_count_dict.values()) if client_count_dict else 0
-                ap.clients = total_clients
-                
-                # Insert client count records for each radio
-                for radio_key, client_count in client_count_dict.items():
-                    radio_id = radio_id_map.get(radio_key)
-                    if radio_id:
-                        client_count_record = ClientCount(
-                            ap_id=ap.id,
-                            radio_id=radio_id,
-                            client_count=client_count,
-                            timestamp=timestamp
-                        )
-                        db.add(client_count_record)
-                        count += 1
-            
+
+                floor = db.query(Floor).filter_by(number=floor_name, building_id=building.id).first()
+                if not floor:
+                    floor = Floor(number=floor_name, building_id=building.id)
+                    db.add(floor)
+                    db.flush()
+
+                for radio_name, count in client_counts.items():
+                    radio = db.query(Radio).filter_by(name=radio_name).first()
+                    if not radio:
+                        radio = Radio(name=radio_name, description="Unknown")
+                        db.add(radio)
+                        db.flush()
+
+                    client_count = ClientCount(
+                        ap_id=None,  # Site-level data has no AP ID
+                        radio_id=radio.id,
+                        client_count=count,
+                        timestamp=timestamp
+                    )
+                    db.add(client_count)
+
             db.commit()
-            logger.info(f"Successfully inserted {count} client count records")
-            
+            logger.info("Client count data updated successfully")
+
         except Exception as e:
             db.rollback()
             logger.error(f"Error updating client count data: {e}")
@@ -284,97 +267,6 @@ def update_client_count_task():
                 replace_existing=True,
             )
             logger.info(f"Next client count update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    """Manually trigger an update of client count data."""
-    try:
-        logger.info("Manual update of client count data requested")
-        
-        now = datetime.now()
-        rounded_unix_timestamp = int(now.timestamp() * 1000)
-        
-        # Fetch client count data from DNA Center API
-        site_data = fetch_client_counts(auth_manager, rounded_unix_timestamp)
-        
-        # Insert client count data
-        timestamp = now.strftime('%Y-%m-%d %H:%M:%S')
-        count = 0
-        
-        for site in site_data:
-            building_name = site.get('siteName')
-            campus_name = site.get('parentSiteName')
-            client_count_data = site.get('clientCount', {})
-            
-            # Get or create building
-            building = db.query(Building).filter_by(name=campus_name).first()
-            if not building:
-                building = Building(name=campus_name)
-                db.add(building)
-                db.flush()
-            
-            # Get or create floor
-            floor = db.query(Floor).filter_by(name=building_name, building_id=building.id).first()
-            if not floor:
-                floor = Floor(name=building_name, building_id=building.id)
-                db.add(floor)
-                db.flush()
-            
-            # Find or create the access point
-            ap_name = site.get('name', building_name)
-            mac_address = site.get('macAddress', '')
-            
-            ap = None
-            if mac_address:
-                ap = db.query(AccessPoint).filter_by(mac_address=mac_address).first()
-            
-            if not ap:
-                ap = AccessPoint(
-                    name=ap_name,
-                    mac_address=mac_address,
-                    ip_address=site.get('ipAddress', ''),
-                    model_name=site.get('type', 'Unknown'),
-                    is_active=1 if site.get('healthScore', 0) > 0 else 0,
-                    floor_id=floor.id,
-                    clients=site.get('numberOfWirelessClients', 0)
-                )
-                db.add(ap)
-                db.flush()
-            
-            # Insert client count for each radio
-            for radio, radio_clients in client_count_data.items():
-                radio_id = radio_id_map.get(radio)
-                if radio_id:
-                    client_count = ClientCount(
-                        ap_id=ap.id,
-                        radio_id=radio_id,
-                        client_count=radio_clients,
-                        timestamp=timestamp
-                    )
-                    db.add(client_count)
-                    count += 1
-            
-            # If no radio-specific data, add total client count
-            if not client_count_data and site.get('numberOfWirelessClients', 0) > 0:
-                client_count = ClientCount(
-                    ap_id=ap.id,
-                    radio_id=1,  # Default to radio0
-                    client_count=site.get('numberOfWirelessClients', 0),
-                    timestamp=timestamp
-                )
-                db.add(client_count)
-                count += 1
-        
-        db.commit()
-        logger.info(f"Successfully inserted {count} client count records")
-        
-        return {"message": "Client count data updated successfully", "count": count}
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error(f"Database error in /update-client-counts: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Unexpected error in /update-client-counts: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/aps", response_model=List[dict], tags=["Access Points"])
 def get_aps(db: Session = Depends(get_db)):
@@ -407,58 +299,34 @@ def get_client_counts(
 ):
     """
     Get client count data from the database.
-    
+
     Args:
         building: Optional filter by building name
         limit: Maximum number of records to return (default: 100)
     """
     try:
-        logger.info(f"Fetching client count data (building={building}, limit={limit})")
-        
-        # Start with base query
-        query = db.query(
-            ClientCount.id,
-            AccessPoint.name.label("ap_name"),
-            Floor.name.label("floor_name"),
-            Building.name.label("building_name"),
-            ClientCount.radio_id,
-            ClientCount.client_count,
-            ClientCount.timestamp
-        ).join(
-            AccessPoint, ClientCount.ap_id == AccessPoint.id
-        ).join(
-            Floor, AccessPoint.floor_id == Floor.id
-        ).join(
-            Building, Floor.building_id == Building.id
-        ).order_by(
-            ClientCount.timestamp.desc()
-        )
-        
-        # Apply building filter if provided
+        query = db.query(ClientCount)
+
         if building:
-            query = query.filter(Building.name == building)
-        
-        # Apply limit
-        results = query.limit(limit).all()
-        
-        logger.info(f"Retrieved {len(results)} client count records")
-        
-        # Convert query results to dictionaries
-        return [{
-            "id": r.id,
-            "ap_name": r.ap_name,
-            "floor_name": r.floor_name,
-            "building_name": r.building_name,
-            "radio_id": r.radio_id,
-            "client_count": r.client_count,
-            "timestamp": r.timestamp
-        } for r in results]
+            query = query.join(AccessPoint).join(Floor).join(Building).filter(Building.name == building)
+
+        query = query.limit(limit)
+        results = query.all()
+
+        return [
+            {
+                "ap_name": db.query(AccessPoint).filter(AccessPoint.id == cc.ap_id).first().name,
+                "client_count": cc.client_count,
+                "timestamp": cc.timestamp
+            }
+            for cc in results
+        ]
     except SQLAlchemyError as e:
         logger.error(f"Database error in /client-counts: {e}")
         raise HTTPException(status_code=500, detail="Database error")
     except Exception as e:
         logger.error(f"Unexpected error in /client-counts: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/buildings", response_model=List[str], tags=["Buildings"])
 def get_buildings(db: Session = Depends(get_db)):

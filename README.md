@@ -98,14 +98,6 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### Using Docker (Optional):
-
-Build the Docker image:
-
-```bash
-docker build -t ap-monitor .
-```
-
 ---
 
 ## **Database Setup**
@@ -120,7 +112,7 @@ createdb -h localhost -p 3306 -U postgres wireless_count
 
 ## **Running the Application**
 
-### Option 1: Using `systemd`
+### Using `systemd`
 
 1. Create a `systemd` service file at `/etc/systemd/system/ap-monitor.service`:
 
@@ -152,14 +144,6 @@ createdb -h localhost -p 3306 -U postgres wireless_count
    ```bash
    sudo systemctl status ap-monitor
    ```
-
-### Option 2: Using Docker
-
-Run the application in a Docker container:
-
-```bash
-docker run -d --name ap-monitor -p 8000:8000 --env-file .env ap-monitor
-```
 
 ---
 
@@ -221,7 +205,7 @@ The application uses `pytest` for testing. Tests are located in the `tests/` dir
 To run the tests, use the following command:
 
 ```bash
-PYTHONPATH=ap_monitor pytest ap_monitor/tests
+TESTING=true PYTHONPATH=ap_monitor pytest -v ap_monitor/tests/
 ```
 
 ---

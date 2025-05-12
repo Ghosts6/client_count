@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from app.db import get_db
 from app.main import app, update_ap_data_task, update_client_count_task
 from app.models import AccessPoint, ClientCount, Radio, Floor, Building
-from datetime import datetime
+from datetime import datetime, timezone
 
 @pytest.fixture
 def override_get_db_with_mock_ap():
@@ -46,7 +46,7 @@ def override_get_db_with_mock_buildings():
 @pytest.fixture()
 def client(session):
     app.dependency_overrides[get_db] = lambda: iter([session])
-    yield TestClient(app)
+    yield TestClient(app=app)  # Explicitly pass 'app' as a keyword argument
     app.dependency_overrides.clear()
 
 def test_get_aps(client, override_get_db_with_mock_ap):
@@ -94,14 +94,22 @@ def test_get_client_counts(client, session):
         ap_id=ap.id,
         radio_id=radio.id,
         client_count=5,
-        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp=datetime.now(timezone.utc)
     )
     session.add(client_count)
     session.commit()
 
-    response = client.get("/client-counts")
-    assert response.status_code == 200
-    assert any("ap_name" in item for item in response.json())
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    
+    try:
+        response = client.get("/client-counts")
+        assert response.status_code == 200
+        assert any("ap_name" in item for item in response.json())
+    finally:
+        app.dependency_overrides.clear()
 
 @patch("app.main.fetch_client_counts")
 @patch("app.main.auth_manager")
@@ -119,20 +127,12 @@ def test_update_client_count_task(mock_auth, mock_fetch, session):
             "healthScore": 10
         }
     ]
-
-    building = Building(name="TestBuilding", latitude=0.0, longitude=0.0)
-    session.add(building)
-    session.flush()
-
-    floor = Floor(number=1, building_id=building.id)
-    session.add(floor)
-    session.flush()
-
+    
     radio = Radio(id=1, name="radio0", description="2.4 GHz")
-    session.merge(radio)  # Use merge to avoid UNIQUE constraint if already exists
+    session.merge(radio)
     session.commit()
 
-    app.dependency_overrides[get_db] = lambda: iter([session])
+    app.dependency_overrides[get_db] = lambda: (s for s in [session])
     update_client_count_task()
     app.dependency_overrides.clear()
 
@@ -156,13 +156,26 @@ def test_update_ap_data_task(mock_auth, mock_fetch, session):
         }
     ]
 
-    radio = Radio(id=1, name="radio0", description="2.4 GHz")
-    session.merge(radio)  # Avoid UNIQUE constraint error
+    # Clean up dependent records in the correct order
+    session.query(ClientCount).delete()
+    session.query(AccessPoint).delete()
+    session.query(Radio).delete()
     session.commit()
 
-    app.dependency_overrides[get_db] = lambda: iter([session])
-    update_ap_data_task()
-    app.dependency_overrides.clear()
+    radio = Radio(id=1, name="radio0", description="2.4 GHz")
+    session.add(radio)
+    session.commit()
 
-    aps = session.query(AccessPoint).all()
-    assert len(aps) > 0
+    # Override get_db to use the in-memory SQLite session
+    app.dependency_overrides[get_db] = lambda: iter([session])
+
+    try:
+        update_ap_data_task()
+
+        aps = session.query(AccessPoint).all()
+        assert len(aps) == 1
+        assert aps[0].mac_address == "AA:BB:CC:DD:EE:FF"
+    finally:
+        app.dependency_overrides.clear()
+
+

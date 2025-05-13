@@ -58,16 +58,30 @@ Ensure the following are installed on the server:
 
 ## **Setup Instructions**
 
-### 1. Clone the Repository
+### 1. Prepare a Clean Deployment Directory
+
+Choose a path for your new app. For example:
+
+```bash
+mkdir -p /statclcn/ap-monitor
+cd /statclcn/ap-monitor
+```
+
+### 2. Create and Activate a Virtual Environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. clone repo
 
 ```bash
 git clone https://github.com/Ghosts6/client_count
 cd ap_monitor
 ```
 
-### 2. Configure Environment Variables
-
-Create a `.env` file in the root directory with the following contents:
+Create a `.env` file in the root directory(near main.py) with the following contents:
 
 ```env
 # Database Configuration
@@ -86,16 +100,53 @@ DNA_PASSWORD=your_password
 LOG_LEVEL=INFO
 ```
 
-Replace the placeholders with your actual database and Cisco DNA Center credentials.
-
-### 3. Install Dependencies
-
-#### Using a Virtual Environment:
+### 4. Install Dependencies
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
+```
+
+### 5. Initialize the Database
+
+Run the function that creates your tables (once):
+
+```bash
+source venv/bin/activate
+python -c "from app.db import init_db; init_db()"
+deactivate
+```
+
+### 6. Create a `systemd` Service
+
+Save the following configuration as `/etc/systemd/system/ap_monitor.service` (edit paths and user/group as needed):
+
+```ini
+[Unit]
+Description=AP Monitor FastAPI Application
+After=network.target
+
+[Service]
+User=statclcn
+Group=statclcn
+WorkingDirectory=/home/statclcn/ap-monitor
+Environment="PATH=/home/statclcn/ap-monitor/venv/bin"
+ExecStart=/home/statclcn/ap-monitor/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 7. Start the New Service
+
+Bring up the new service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ap_monitor.service
+sudo systemctl start ap_monitor.service
+sudo systemctl status ap_monitor.service   # Verify it’s running
 ```
 
 ---
@@ -107,43 +158,6 @@ Ensure PostgreSQL is running and create the database:
 ```bash
 createdb -h localhost -p 3306 -U postgres wireless_count
 ```
-
----
-
-## **Running the Application**
-
-### Using `systemd`
-
-1. Create a `systemd` service file at `/etc/systemd/system/ap-monitor.service`:
-
-   ```ini
-   [Unit]
-   Description=AP Monitor FastAPI Application
-   After=network.target
-
-   [Service]
-   User=your_user
-   WorkingDirectory=/path/to/ap-monitor
-   ExecStart=/path/to/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
-   Restart=always
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-2. Enable and start the service:
-
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable ap-monitor
-   sudo systemctl start ap-monitor
-   ```
-
-3. Verify the service status:
-
-   ```bash
-   sudo systemctl status ap-monitor
-   ```
 
 ---
 
@@ -189,8 +203,6 @@ Application logs are stored in the `Logs/` directory:
 Logs/ap-monitor.log
 ```
 
-Ensure the `Logs/` directory is writable by the application.
-
 ---
 
 ## **Testing**
@@ -207,33 +219,3 @@ To run the tests, use the following command:
 ```bash
 TESTING=true PYTHONPATH=ap_monitor pytest -v ap_monitor/tests/
 ```
-
----
-
-## **Deployment Notes**
-
-### **Security Considerations**
-
-- Use a secure `.env` file to store sensitive credentials.
-- Restrict access to the API endpoints using a reverse proxy (e.g., NGINX) or authentication mechanisms.
-- Regularly monitor logs for errors or unauthorized access attempts.
-
-### **Scaling**
-
-- For high availability, deploy the application using Docker Swarm or Kubernetes.
-- Use a load balancer to distribute traffic across multiple instances.
-
----
-
-## **Troubleshooting**
-
-### Common Issues
-
-| Issue                          | Solution                                                                 |
-|--------------------------------|-------------------------------------------------------------------------|
-| Database connection error      | Ensure PostgreSQL is running and credentials in `.env` are correct.     |
-| API authentication error       | Verify Cisco DNA Center credentials in `.env`.                         |
-| Scheduler not running          | Check the `systemd` service status or Docker container logs.            |
-| Logs not generated             | Ensure the `Logs/` directory exists and is writable.                   |
-
----

@@ -23,6 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          cd ap_monitor
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 

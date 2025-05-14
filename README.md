@@ -19,28 +19,32 @@
 ## **Project Structure**
 
 ```
-ap-monitor/
-├── app/
+client_count/
+├── ap_monitor/
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── db.py
+│   │   ├── dna_api.py
+│   │   ├── main.py
+│   │   ├── models.py
+│   │   └── utils.py
 │   ├── __init__.py
-│   ├── main.py          # FastAPI application entry point
-│   ├── db.py            # Database connection and initialization
-│   ├── models.py        # Database schema (AccessPoint and ClientCount models)
-│   ├── dna_api.py       # Handles communication with Cisco DNA Center API
-│   ├── utils.py         # Utility functions (e.g., logging, scheduling)
+│   ├── __pycache__/
+│   ├── main.py
+│   ├── tests/
+│   │   ├── __init__.py
+│   │   ├── conftest.py
+│   │   ├── test_db.py
+│   │   ├── test_dna_api.py
+│   │   ├── test_main.py
+│   │   ├── test_models.py
+│   │   └── test_utils.py
+│   ├── .env
+│   ├── requirements.txt
 ├── Logs/
-│   └── ap-monitor.log   # Application logs
-├── tests/
-│   ├── test_models.py   # Tests for database models
-│   ├── test_main.py     # Tests for main
-│   ├── test_db.py       # Tests for db 
-│   ├── test_dna_api.py  # Tests for DNA Center API integration
-│   ├── test_utils.py    # Tests for utility functions
-│   ├── conftest.py      # Test fixtures for database and FastAPI client
-├── .env                 # Environment variables
-├── requirements.txt     # Project dependencies
-├── pytest.ini           # Pytest configuration
-├── README.md            # Project documentation
-└── main.py              # Script to start the application
+├── venv/
+├── pytest.ini
+├── README.md
 ```
 
 ---
@@ -63,8 +67,8 @@ Ensure the following are installed on the server:
 Choose a path for your new app. For example:
 
 ```bash
-mkdir -p /statclcn/ap-monitor
-cd /statclcn/ap-monitor
+mkdir -p /home/statclcn/client_count
+cd /home/statclcn/client_count
 ```
 
 ### 2. Create and Activate a Virtual Environment
@@ -74,14 +78,16 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. clone repo
+### 3. Clone the Repository
 
 ```bash
 git clone https://github.com/Ghosts6/client_count
-cd ap_monitor
+cd client_count
 ```
 
-Create a `.env` file in the root directory(near main.py) with the following contents:
+### 4. Configure Environment Variables
+
+Create a `.env` file in the root directory with the following contents:
 
 ```env
 # Database Configuration
@@ -100,13 +106,13 @@ DNA_PASSWORD=your_password
 LOG_LEVEL=INFO
 ```
 
-### 4. Install Dependencies
+### 5. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Initialize the Database
+### 6. Initialize the Database
 
 Run the function that creates your tables (once):
 
@@ -116,7 +122,7 @@ python -c "from app.db import init_db; init_db()"
 deactivate
 ```
 
-### 6. Create a `systemd` Service
+### 7. Create a `systemd` Service
 
 Save the following configuration as `/etc/systemd/system/ap_monitor.service` (edit paths and user/group as needed):
 
@@ -128,9 +134,9 @@ After=network.target
 [Service]
 User=statclcn
 Group=statclcn
-WorkingDirectory=/home/statclcn/ap-monitor
-Environment="PATH=/home/statclcn/ap-monitor/venv/bin"
-ExecStart=/home/statclcn/ap-monitor/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/home/statclcn/client_count
+Environment="PATH=/home/statclcn/client_count/venv/bin"
+ExecStart=/home/statclcn/client_count/venv/bin/uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 
@@ -138,7 +144,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### 7. Start the New Service
+### 8. Start the New Service
 
 Bring up the new service:
 

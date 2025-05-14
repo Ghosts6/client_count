@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, Query
 from contextlib import asynccontextmanager

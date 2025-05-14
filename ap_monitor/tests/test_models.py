@@ -1,5 +1,5 @@
 from app.models import Building, Floor, Room, AccessPoint, ClientCount, Radio
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 import pytest
 import time
@@ -34,7 +34,7 @@ def test_access_point_and_client_count(session):
     assert ap.floor == f              
 
     # Create a ClientCount linked to the AccessPoint
-    cc = ClientCount(access_point=ap, radio_id=1, client_count=5, timestamp=datetime.now(UTC))
+    cc = ClientCount(access_point=ap, radio_id=1, client_count=5, timestamp=datetime.now(timezone.utc))
     session.add(cc)
     session.commit()
     assert cc.access_point == ap      
@@ -89,7 +89,7 @@ def test_access_point_full_fields(session):
 
 def test_client_count_creation(session):
     ap = AccessPoint(name="TestAP", mac_address="FF:EE:DD:CC:BB", clients=7)
-    cc = ClientCount(access_point=ap, radio_id=2, client_count=3, timestamp=datetime.now(UTC))
+    cc = ClientCount(access_point=ap, radio_id=2, client_count=3, timestamp=datetime.now(timezone.utc))
 
     session.add_all([ap, cc])
     session.commit()

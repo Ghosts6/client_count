@@ -1,0 +1,34 @@
+name: Build Linux venv
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-venv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10.12'
+
+      - name: Create virtualenv and install dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r ap_monitor/requirements.txt
+
+      - name: Archive virtual environment
+        run: |
+          tar -czf linux-venv.tar.gz venv
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-venv
+          path: linux-venv.tar.gz

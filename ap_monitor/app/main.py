@@ -16,6 +16,9 @@ from app.models import AccessPoint, ClientCount, Building, Floor, Room, Radio
 from app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, radio_id_map
 from app.utils import setup_logging, calculate_next_run_time
 
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session
+
 def get_database_url():
     if os.getenv("TESTING", "false").lower() == "true":
         return "sqlite:///:memory:"
@@ -53,6 +56,10 @@ scheduler = BackgroundScheduler()
 
 # Create auth manager for DNA Center API
 auth_manager = AuthManager()
+
+APCLIENT_DB_URL = os.getenv("APCLIENT_DB_URL", "postgresql://postgres:@localhost:3306/apclientcount")
+apclient_engine = create_engine(APCLIENT_DB_URL)
+ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -139,12 +146,12 @@ def update_ap_data_task():
                 location = ap.get('location', '')
                 location_parts = location.split('/')
 
-                if len(location_parts) < 4:
+                if len(location_parts) < 5:
                     logger.warning(f"Skipping device {ap.get('name')} due to invalid location format: {location}")
                     continue
 
-                building_name = location_parts[2]
-                floor_name = location_parts[3]
+                building_name = location_parts[3]
+                floor_name = location_parts[4]
 
                 logger.debug(f"Processing AP: {ap.get('name')} in Building: {building_name}, Floor: {floor_name}")
 
@@ -267,6 +274,76 @@ def update_client_count_task():
                 replace_existing=True,
             )
             logger.info(f"Next client count update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+
+def insert_apclientcount_data(device_info_list, timestamp, session=None):
+    from app.models import Building, Floor, AccessPoint, ClientCount
+    close_session = False
+    if session is None:
+        session = ApclientSessionLocal()
+        close_session = True
+    try:
+        radioId_map = {'radio0': 1, 'radio1': 2, 'radio2': 3}
+        for device in device_info_list:
+            ap_name = device['name']
+            location = device.get('location', '')
+            location_parts = location.split('/')
+            if len(location_parts) < 5:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+            building_name = location_parts[3]
+            floor_name = location_parts[4]
+            # Building
+            building = session.query(Building).filter_by(name=building_name).first()
+            if not building:
+                building = Building(name=building_name)
+                session.add(building)
+                session.flush()
+            # Floor
+            floor = session.query(Floor).filter_by(number=floor_name, building_id=building.id).first()
+            if not floor:
+                floor = Floor(number=floor_name, building_id=building.id)
+                session.add(floor)
+                session.flush()
+            # Access Point
+            mac_address = device['macAddress']
+            ap = session.query(AccessPoint).filter_by(mac_address=mac_address).first()
+            is_active = device['reachabilityHealth'] == "UP"
+            if not ap:
+                ap = AccessPoint(
+                    name=ap_name,
+                    mac_address=mac_address,
+                    ip_address=device.get('ipAddress'),
+                    model_name=device.get('model'),
+                    is_active=is_active,
+                    floor_id=floor.id,
+                    clients=sum(device.get('clientCount', {}).values()),
+                )
+                session.add(ap)
+                session.flush()
+            else:
+                ap.is_active = is_active
+                ap.clients = sum(device.get('clientCount', {}).values())
+            # ClientCount
+            for radio, count in device.get('clientCount', {}).items():
+                radio_id = radioId_map.get(radio)
+                if radio_id is None:
+                    logger.warning(f"Unexpected radio key: {radio}")
+                    continue
+                cc = ClientCount(
+                    ap_id=ap.id,
+                    radio_id=radio_id,
+                    client_count=count,
+                    timestamp=timestamp
+                )
+                session.add(cc)
+        session.commit()
+        logger.info(f"Inserted/updated AP and client count data in apclientcount DB for {len(device_info_list)} devices.")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error inserting data into apclientcount DB: {e}")
+    finally:
+        if close_session:
+            session.close()
 
 @app.get("/aps", response_model=List[dict], tags=["Access Points"])
 def get_aps(db: Session = Depends(get_db)):

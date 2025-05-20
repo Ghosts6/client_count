@@ -3,13 +3,13 @@ import pytest
 import io
 from unittest.mock import patch, MagicMock, mock_open
 from datetime import datetime
-from app.utils import setup_logging, calculate_next_run_time, load_env_file
+from ap_monitor.app.utils import setup_logging, calculate_next_run_time, load_env_file
 
 
-@patch("app.utils.os.makedirs")
-@patch("app.utils.TimedRotatingFileHandler")
-@patch("app.utils.logging.basicConfig")
-@patch("app.utils.logging.StreamHandler")
+@patch("ap_monitor.app.utils.os.makedirs")
+@patch("ap_monitor.app.utils.TimedRotatingFileHandler")
+@patch("ap_monitor.app.utils.logging.basicConfig")
+@patch("ap_monitor.app.utils.logging.StreamHandler")
 def test_setup_logging(mock_StreamHandler, mock_basicConfig, mock_TimedRotatingFileHandler, mock_makedirs):
     mock_stream_handler = MagicMock()
     mock_StreamHandler.return_value = mock_stream_handler

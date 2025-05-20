@@ -8,9 +8,9 @@ from sqlalchemy.engine import Engine
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from app.models import Base
-from app.db import get_db, SessionLocal
-from app.main import app, initialize_database
+from ap_monitor.app.models import AccessPoint, ClientCount, Building, Floor, Campus, ApBuilding, Room, RadioType, ClientCountAP, Base
+from ap_monitor.app.db import get_db, SessionLocal
+from ap_monitor.app.main import app, initialize_database
 
 # Set TESTING environment variable
 os.environ["TESTING"] = "true"

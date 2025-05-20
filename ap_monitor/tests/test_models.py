@@ -1,149 +1,178 @@
-from app.models import Building, Floor, Room, AccessPoint, ClientCount, Radio
+from ap_monitor.app.models import (
+    AccessPoint, ClientCount, Building, Floor, Campus, 
+    ApBuilding, Room, RadioType, ClientCountAP
+)
 from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 import pytest
 import time
+from decimal import Decimal
+import ipaddress
 
-def test_create_building_and_floor(session):
-    # Create a Building
-    bldg = Building(name="Main Office")
-    session.add(bldg)
+# Tests for wireless_count schema
+def test_create_campus_and_building(session):
+    campus = Campus(campus_name="Main Campus")
+    session.add(campus)
     session.commit()
-    assert bldg.id is not None
-
-    # Create a Floor linked to the Building
-    floor = Floor(number=1, building_id=bldg.id)
-    session.add(floor)
-    session.commit()
-
-    # SQLAlchemy will populate the relationship:
-    assert floor.building == bldg     
-    assert floor in bldg.floors       
-
-def test_access_point_and_client_count(session):
-    # Setup: one building and floor
-    b = Building(name="Annex")
-    f = Floor(number=2, building=b)
-    session.add_all([b, f])
-    session.commit()
-
-    # Create an AccessPoint on that floor
-    ap = AccessPoint(name="AP1", mac_address="AA:BB:CC:DD:EE", floor_id=f.id)
-    session.add(ap)
-    session.commit()
-    assert ap.floor == f              
-
-    # Create a ClientCount linked to the AccessPoint
-    cc = ClientCount(access_point=ap, radio_id=1, client_count=5, timestamp=datetime.now(timezone.utc))
-    session.add(cc)
-    session.commit()
-    assert cc.access_point == ap      
-    assert cc in ap.client_counts
-
-def test_create_building_and_floor(session):
-    bldg = Building(name="Main Office")
-    session.add(bldg)
-    session.commit()
-    assert bldg.id is not None
-
-    floor = Floor(number=1, building_id=bldg.id)
-    session.add(floor)
-    session.commit()
-    assert floor.id is not None
-    assert floor.building_id == bldg.id
-
-def test_create_room_and_relationship(session):
-    building = Building(name="Tower")
-    floor = Floor(number=3, building=building)
-    room = Room(name="301", floor=floor)
-
-    session.add_all([building, floor, room])
-    session.commit()
-
-    assert room.id is not None
-    assert room.floor == floor
-    assert room in floor.access_points[0].room.access_points if floor.access_points else True
-
-def test_access_point_full_fields(session):
-    b = Building(name="Science Hall")
-    f = Floor(number=1, building=b)
-    r = Room(name="Lab A", floor=f)
-    ap = AccessPoint(
-        name="AP-SH-1",
-        mac_address="11:22:33:44:55:66",
-        ip_address="192.168.1.100",
-        model_name="Cisco 3800",
-        is_active=True,
-        floor=f,
-        room=r,
-        clients=12
+    
+    building = Building(
+        building_name="Engineering Building",
+        campus_id=campus.campus_id,
+        latitude=37.7749,
+        longitude=-122.4194
     )
-    session.add_all([b, f, r, ap])
-    session.commit()
-
-    assert ap.id is not None
-    assert ap.room == r
-    assert ap.floor == f
-    assert ap.clients == 12
-    assert ap.is_active is True
-
-def test_client_count_creation(session):
-    ap = AccessPoint(name="TestAP", mac_address="FF:EE:DD:CC:BB", clients=7)
-    cc = ClientCount(access_point=ap, radio_id=2, client_count=3, timestamp=datetime.now(timezone.utc))
-
-    session.add_all([ap, cc])
-    session.commit()
-
-    assert cc.id is not None
-    assert cc.radio_id == 2
-    assert cc.client_count == 3
-    assert cc.access_point == ap
-
-def test_radio_creation(session):
-    radio = Radio(name="Radio5GHz", description="High performance")
-    session.add(radio)
-    session.commit()
-
-    assert radio.id is not None
-    assert radio.name == "Radio5GHz"
-    assert radio.description == "High performance"
-
-def test_updated_at_changes_on_update(session):
-    building = Building(name="Old Building")
     session.add(building)
     session.commit()
-    original_updated_at = building.updated_at
+    
+    assert building.building_id is not None
+    assert building.campus.campus_name == "Main Campus"
 
-    time.sleep(1)  # wait 1 second to ensure timestamp difference
-
-    building.name = "Renovated Building"
+def test_create_client_count(session):
+    campus = Campus(campus_name="North Campus")
+    session.add(campus)
     session.commit()
-    session.refresh(building)
-
-    assert building.updated_at > original_updated_at
-
-def test_unique_mac_address_constraint(session):
-    ap1 = AccessPoint(name="AP1", mac_address="00:00:00:00:00:01")
-    ap2 = AccessPoint(name="AP2", mac_address="00:00:00:00:00:01")
-    session.add_all([ap1, ap2])
-    with pytest.raises(IntegrityError):
-        session.commit()
-
-def test_cascade_delete_floors(session):
-    b = Building(name="Temp Building")
-    f = Floor(number=1, building=b)
-    session.add_all([b, f])
+    
+    building = Building(
+        building_name="Science Building",
+        campus_id=campus.campus_id,
+        latitude=37.7749,
+        longitude=-122.4194
+    )
+    session.add(building)
     session.commit()
-
-    session.delete(b)
+    
+    client_count = ClientCount(
+        building_id=building.building_id,
+        client_count=50
+    )
+    session.add(client_count)
     session.commit()
+    
+    assert client_count.count_id is not None
+    assert client_count.client_count == 50
 
-    assert session.query(Floor).filter_by(building_id=b.id).count() == 0
+# Tests for apclientcount schema
+def test_create_ap_building_and_floor(session):
+    building = ApBuilding(buildingname="Main Hall")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(floorname="1", buildingid=building.buildingid)
+    session.add(floor)
+    session.commit()
+    
+    assert floor.floorid is not None
+    assert floor.building.buildingname == "Main Hall"
 
-def test_access_point_defaults(session):
-    ap = AccessPoint(name="AP Default", mac_address="AB:CD:EF:12:34:56")
+def test_create_room_and_access_point(session):
+    building = ApBuilding(buildingname="Main Hall")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(floorname="1", buildingid=building.buildingid)
+    session.add(floor)
+    session.commit()
+    
+    room = Room(roomname="Lab A", floorid=floor.floorid)
+    session.add(room)
+    session.commit()
+    
+    # Convert IP address to string for SQLite compatibility
+    ip_str = str(ipaddress.ip_address("192.168.1.100"))
+    ap = AccessPoint(
+        apname="AP-SH-1",
+        macaddress="11:22:33:44:55:66",
+        ipaddress=ip_str,
+        modelname="Cisco 3800",
+        isactive=True,
+        floorid=floor.floorid,
+        roomid=room.roomid,
+        buildingid=building.buildingid
+    )
     session.add(ap)
     session.commit()
+    
+    assert ap.apid is not None
+    assert ap.apname == "AP-SH-1"
 
-    assert ap.clients == 0
-    assert ap.is_active is True
+def test_create_radio_and_client_count(session):
+    radio = RadioType(radioname="5GHz")
+    session.add(radio)
+    session.commit()
+    
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(floorname="1", buildingid=building.buildingid)
+    session.add(floor)
+    session.commit()
+    
+    ap = AccessPoint(
+        apname="TestAP",
+        macaddress="FF:EE:DD:CC:BB:AA",
+        floorid=floor.floorid,
+        buildingid=building.buildingid
+    )
+    session.add(ap)
+    session.commit()
+    
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=10,
+        timestamp=datetime.now(timezone.utc)
+    )
+    session.add(client_count)
+    session.commit()
+    
+    assert client_count.countid is not None
+    assert client_count.clientcount == 10
+
+def test_unique_constraints(session):
+    # Test unique campus name
+    campus1 = Campus(campus_name="Unique Campus")
+    session.add(campus1)
+    session.commit()
+
+    # Try to create another campus with the same name
+    campus2 = Campus(campus_name="Unique Campus")
+    session.add(campus2)
+    
+    # This should raise an IntegrityError
+    with pytest.raises(Exception) as exc_info:
+        session.commit()
+    assert "UNIQUE constraint failed" in str(exc_info.value)
+
+def test_cascade_delete(session):
+    # Test cascade delete for AP building
+    building = ApBuilding(buildingname="CascadeTest")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(floorname="1", buildingid=building.buildingid)
+    session.add(floor)
+    session.commit()
+    
+    room = Room(roomname="Test Room", floorid=floor.floorid)
+    session.add(room)
+    session.commit()
+    
+    ap = AccessPoint(
+        apname="TestAP",
+        macaddress="11:22:33:44:55:66",
+        floorid=floor.floorid,
+        roomid=room.roomid,
+        buildingid=building.buildingid
+    )
+    session.add(ap)
+    session.commit()
+    
+    # Delete the building
+    session.delete(building)
+    session.commit()
+    
+    # Verify cascade delete
+    assert session.query(Floor).filter_by(floorid=floor.floorid).first() is None
+    assert session.query(Room).filter_by(roomid=room.roomid).first() is None
+    assert session.query(AccessPoint).filter_by(apid=ap.apid).first() is None

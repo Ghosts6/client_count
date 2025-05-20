@@ -2,11 +2,11 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data
+from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data
 from urllib.error import HTTPError, URLError
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_get_token_success(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({"Token": "mocked_token"}).encode()
@@ -20,7 +20,7 @@ def test_get_token_success(mock_urlopen):
     assert auth.token == "mocked_token"
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_fetch_client_counts(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
@@ -40,7 +40,7 @@ def test_fetch_client_counts(mock_urlopen):
     assert all(site.get("parentSiteName") == "Keele Campus" for site in data)
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_fetch_ap_data(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
@@ -62,7 +62,7 @@ def test_fetch_ap_data(mock_urlopen):
     assert {ap['uuid'] for ap in data} == {"abc123", "def456"}
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_get_ap_data(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
@@ -83,7 +83,7 @@ def test_get_ap_data(mock_urlopen):
     assert data[0]['macAddress'] == "AA:BB"
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_auth_manager_token_refresh(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({"Token": "abc123"}).encode()
@@ -96,21 +96,21 @@ def test_auth_manager_token_refresh(mock_urlopen):
     assert auth.token_expiry > datetime.now()
 
 
-@patch("app.dna_api.urlopen", side_effect=HTTPError(None, 500, "Server Error", None, None))
+@patch("ap_monitor.app.dna_api.urlopen", side_effect=HTTPError(None, 500, "Server Error", None, None))
 def test_auth_manager_http_error(mock_urlopen):
     auth = AuthManager()
     with pytest.raises(Exception, match="Failed to obtain access token"):
         auth.get_token()
 
 
-@patch("app.dna_api.urlopen", side_effect=URLError("DNS failure"))
+@patch("ap_monitor.app.dna_api.urlopen", side_effect=URLError("DNS failure"))
 def test_auth_manager_url_error(mock_urlopen):
     auth = AuthManager()
     with pytest.raises(Exception, match="Failed to obtain access token"):
         auth.get_token()
 
 
-@patch("app.dna_api.urlopen")
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_fetch_client_counts_retries(mock_urlopen):
     auth = AuthManager()
     auth.token = "token"
@@ -129,7 +129,7 @@ def test_fetch_client_counts_retries(mock_urlopen):
     assert data[0]["parentSiteName"] == "Keele Campus"
 
 
-@patch("app.dna_api.urlopen", side_effect=Exception("API unreachable"))
+@patch("ap_monitor.app.dna_api.urlopen", side_effect=Exception("API unreachable"))
 def test_get_ap_data_failure(mock_urlopen):
     auth = AuthManager()
     auth.token = "token"
@@ -141,6 +141,6 @@ def test_get_ap_data_failure(mock_urlopen):
 
 @patch.dict("os.environ", {"DNA_USERNAME": "", "DNA_PASSWORD": ""})
 def test_env_vars_missing():
-    with patch("app.dna_api.AuthManager.__init__", side_effect=ValueError("DNA_USERNAME and DNA_PASSWORD must be set in .env file")):
+    with patch("ap_monitor.app.dna_api.AuthManager.__init__", side_effect=ValueError("DNA_USERNAME and DNA_PASSWORD must be set in .env file")):
         with pytest.raises(ValueError, match="DNA_USERNAME and DNA_PASSWORD must be set"):
             AuthManager()

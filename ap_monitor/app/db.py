@@ -54,7 +54,7 @@ def init_db():
     try:
         logger.info("Creating database tables...")
         # Import models here to avoid circular imports
-        from app.models import AccessPoint, ClientCount
+        from ap_monitor.app.models import AccessPoint, ClientCount
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
     except Exception as e:

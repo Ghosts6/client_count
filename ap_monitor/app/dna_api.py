@@ -242,3 +242,73 @@ def get_ap_data(auth_manager=None, retries=3):
                 logger.error(f"Failed to fetch AP data after {retries} attempts: {e}")
                 raise
             time.sleep(2 ** attempt)  # Exponential backoff
+
+def insert_apclientcount_data(device_info_list, timestamp, session=None):
+    """Insert AP and client count data into the database."""
+    from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType
+    close_session = False
+    if session is None:
+        session = ApclientSessionLocal()
+        close_session = True
+    try:
+        radioId_map = {r.radioname: r.radioid for r in session.query(RadioType).all()}
+        for device in device_info_list:
+            ap_name = device['name']
+            location = device.get('location', '')
+            location_parts = location.split('/')
+            if len(location_parts) < 5:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+            building_name = location_parts[3]
+            floor_name = location_parts[4]
+            # Building
+            building = session.query(ApBuilding).filter_by(buildingname=building_name).first()
+            if not building:
+                building = ApBuilding(buildingname=building_name)
+                session.add(building)
+                session.flush()
+            # Floor
+            floor = session.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
+            if not floor:
+                floor = Floor(floorname=floor_name, buildingid=building.buildingid)
+                session.add(floor)
+                session.flush()
+            # Access Point
+            mac_address = device['macAddress']
+            ap = session.query(AccessPoint).filter_by(macaddress=mac_address).first()
+            is_active = device['reachabilityHealth'] == "UP"
+            if not ap:
+                ap = AccessPoint(
+                    apname=ap_name,
+                    macaddress=mac_address,
+                    ipaddress=device.get('ipAddress'),
+                    modelname=device.get('model'),
+                    isactive=is_active,
+                    floorid=floor.floorid,
+                    buildingid=building.buildingid
+                )
+                session.add(ap)
+                session.flush()
+            else:
+                ap.isactive = is_active
+            # ClientCountAP
+            for radio, count in device.get('clientCount', {}).items():
+                radio_id = radioId_map.get(radio)
+                if radio_id is None:
+                    logger.warning(f"Unexpected radio key: {radio}")
+                    continue
+                cc = ClientCountAP(
+                    apid=ap.apid,
+                    radioid=radio_id,
+                    clientcount=count,
+                    timestamp=timestamp
+                )
+                session.add(cc)
+        session.commit()
+        logger.info(f"Inserted/updated AP and client count data in apclientcount DB for {len(device_info_list)} devices.")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error inserting data into apclientcount DB: {e}")
+    finally:
+        if close_session:
+            session.close()

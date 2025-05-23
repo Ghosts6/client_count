@@ -224,4 +224,113 @@ To run the tests, use the following command:
 
 ```bash
 TESTING=true PYTHONPATH=ap_monitor pytest -v ap_monitor/tests/
+# or
+./run_tests.sh
+```
+
+Api end point test:
+
+```bash
+curl -i http://localhost:8000/
+curl -i http://localhost:8000/openapi.json
+curl -i http://localhost:8000/buildings
+```
+
+run app manualy:
+
+```bash
+uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+---
+## **Automated Cleanup with pg\_cron**
+
+This PostgreSQL setup uses the `pg_cron` extension to schedule a daily cleanup job that deletes old records (older than 30 days) from two tables:
+
+* `clientcount` in the `apclientcount` database
+* `client_counts` in the `wireless_count` database (via Unix socket)
+
+### Configuration Overview
+
+The cleanup is handled safely and automatically with the following configurations and components:
+
+### **1. Install `pg_cron` Extension**
+
+Install `pg_cron` using your package manager (example for Debian-based systems):
+
+```bash
+sudo apt install postgresql-14-cron
+```
+
+Enable the extension in your PostgreSQL configuration:
+
+```bash
+# postgresql.conf
+shared_preload_libraries = 'pg_cron'
+cron.database_name = 'apclientcount'
+cron.host = '/var/run/postgresql'
+cron.port = 3306
+```
+
+> 🔄 After updating the config, **restart** PostgreSQL:
+
+```bash
+sudo systemctl restart postgresql
+```
+
+### **2. Enable `pg_cron` in the Database**
+
+Connect to the `apclientcount` database and enable the extension:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+```
+
+### **3. Create Cleanup Function**
+
+Define a reusable PL/pgSQL function to delete stale records:
+
+```sql
+CREATE OR REPLACE FUNCTION public.cleanup_counts() RETURNS void AS
+$$
+BEGIN
+  -- Local cleanup
+  DELETE FROM clientcount
+   WHERE timestamp < NOW() - INTERVAL '30 days';
+
+  -- Remote cleanup via Unix socket on port 3306
+  PERFORM dblink_exec(
+    'host=/var/run/postgresql port=3306 dbname=wireless_count user=postgres',
+    'DELETE FROM client_counts WHERE time_inserted < NOW() - INTERVAL ''30 days'';'
+  );
+END
+$$ LANGUAGE plpgsql;
+```
+
+### **4. Schedule the Daily Cleanup Job**
+
+Create a daily cron job that runs at 3:00 AM:
+
+```sql
+SELECT cron.schedule(
+  'daily_cleanup',
+  '0 3 * * *',
+  $$ SELECT cleanup_counts(); $$
+);
+```
+
+### ✅ **Result**
+
+* The task runs every day at 3:00 AM.
+* It safely cleans both local and remote tables using a secure Unix socket.
+* Logs and status can be monitored via:
+
+```sql
+SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;
+```
+
+> 🛑 You can cancel the scheduled job at any time:
+
+```sql
+SELECT cron.unschedule('daily_cleanup');
 ```

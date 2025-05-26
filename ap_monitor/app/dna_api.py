@@ -56,13 +56,24 @@ class AuthManager:
         self.auth_headers = auth_headers
         self.token = None
         self.token_expiry = None
+        self.last_refresh_time = None
+        self.min_refresh_interval = 30  # Minimum seconds between token refreshes
         logger.info(f"Initializing AuthManager with URL: {auth_url}")
         logger.info(f"Auth headers (excluding credentials): {dict(filter(lambda x: x[0] != 'Authorization', auth_headers.items()))}")
     
-    def get_token(self):
+    def get_token(self, force_refresh=False):
         """Get a valid authentication token, refreshing if necessary."""
         current_time = datetime.now()
-        if not self.token or not self.token_expiry or current_time >= self.token_expiry - timedelta(minutes=5):
+        
+        # Check if we need to wait before refreshing
+        if self.last_refresh_time:
+            time_since_last_refresh = (current_time - self.last_refresh_time).total_seconds()
+            if time_since_last_refresh < self.min_refresh_interval:
+                wait_time = self.min_refresh_interval - time_since_last_refresh
+                logger.info(f"Waiting {wait_time:.1f} seconds before refreshing token...")
+                time.sleep(wait_time)
+        
+        if not self.token or not self.token_expiry or current_time >= self.token_expiry - timedelta(minutes=5) or force_refresh:
             logger.info("Refreshing authentication token")
             req = Request(self.auth_url, headers=self.auth_headers, method='POST')
             try:
@@ -75,6 +86,7 @@ class AuthManager:
                             logger.error(f"Response data: {response_data}")
                             raise Exception("No token in response data")
                         self.token_expiry = current_time + timedelta(minutes=55)
+                        self.last_refresh_time = current_time
                         logger.info("Authentication token successfully refreshed")
                         logger.debug(f"Token expiry set to: {self.token_expiry}")
                     else:
@@ -130,105 +142,164 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
     # Filter for Keele Campus buildings
     return [site for site in data if site.get('parentSiteName') == 'Keele Campus']
 
-def fetch_ap_data(auth_manager, rounded_unix_timestamp, retries=3):
-    """
-    Fetch access point data from DNA Center API with detailed information.
-    
-    Args:
-        auth_manager: AuthManager instance for token management
-        rounded_unix_timestamp: Timestamp for the API query
-        retries: Number of retries for failed requests
+def test_api_connection():
+    """Test the API connection and return detailed information about the response."""
+    auth_manager = AuthManager()
+    try:
+        token = auth_manager.get_token()
+        if not token:
+            return {"status": "error", "message": "Failed to obtain authentication token"}
         
-    Returns:
-        List of unique AP data with client counts
-    """
-    token = auth_manager.get_token()
-    auth_headers = {'x-auth-token': token}
-    data = []
-    
-    # Allow time for API to be ready
-    time.sleep(5)  
-    
-    i = 0
-    length = 250  # Initial value to enter the loop
-    
-    logger.info(f"Starting AP data fetch with timestamp: {rounded_unix_timestamp}")
-    logger.info(f"Using site ID: {KEELE_CAMPUS_SITE_ID}")
-    
-    while length == 250:  # Continue until we get less than 250 devices (pagination)
+        # Test the device health endpoint
+        auth_headers = {
+            'x-auth-token': token,
+            'Content-Type': 'application/json'
+        }
+        
         params = {
-            "deviceRole": "AP", 
-            "siteId": KEELE_CAMPUS_SITE_ID, 
-            "limit": 250, 
-            "offset": (250 * i) + 1,
-            "startTime": rounded_unix_timestamp - 300000,  # 5 minutes before
-            "endTime": rounded_unix_timestamp
+            "deviceRole": "AP",
+            "siteId": KEELE_CAMPUS_SITE_ID,
+            "limit": 1,
+            "offset": 1
         }
         
         query_string = urlencode(params)
-        req = Request(f"{DEVICE_HEALTH_URL}?{query_string}", headers=auth_headers)
+        test_url = f"{DEVICE_HEALTH_URL}?{query_string}"
+        req = Request(test_url, headers=auth_headers)
         
-        attempt = 0
-        while attempt < retries:
-            try:
-                logger.info(f"Making API request {i + 1} with params: {params}")
-                with urlopen(req, context=ssl_context, timeout=60) as response:
-                    device_info = json.load(response)
-                    logger.info(f"API Response for request {i + 1}: {json.dumps(device_info, indent=2)}")
-                    
-                    # Log response statistics
-                    response_data = device_info.get("response", [])
-                    logger.info(f"Response {i + 1} contains {len(response_data)} devices")
-                    if response_data:
-                        sample_device = response_data[0]
-                        logger.info(f"Sample device data: {json.dumps(sample_device, indent=2)}")
-                    
-                    break  # Exit retry loop if successful
-            except (HTTPError, URLError) as e:
-                attempt += 1
-                logger.warning(f"{type(e).__name__} (attempt {attempt}/{retries}): {e}")
-                if attempt < retries:
-                    wait_time = 2 ** attempt
-                    logger.info(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)  # Exponential backoff
-                else:
-                    logger.error(f"Failed due to {type(e).__name__} after {retries} attempts: {e}")
-                    raise
-            except Exception as e:
-                attempt += 1
-                logger.warning(f"General error (attempt {attempt}/{retries}): {e}")
-                if attempt < retries:
-                    wait_time = 2 ** attempt
-                    logger.info(f"Waiting {wait_time} seconds before retry...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Failed due to general error after {retries} attempts: {e}")
-                    raise
+        with urlopen(req, context=ssl_context, timeout=60) as response:
+            response_data = response.read().decode('utf-8')
+            device_info = json.loads(response_data)
+            
+            return {
+                "status": "success",
+                "response": device_info,
+                "headers": dict(response.getheaders()),
+                "status_code": response.status
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "type": type(e).__name__
+        }
+
+def fetch_ap_data(auth_manager, timestamp=None):
+    """
+    Fetch AP data from DNA Center API with rate limit handling
+    """
+    logger.info("Starting AP data fetch")
+    
+    all_devices = []
+    offset = 1
+    limit = 100  # Reduced from 250 to avoid rate limits
+    total_count = None
+    
+    while True:
+        # Build request parameters without timestamps
+        params = {
+            "deviceRole": "AP",
+            "siteId": KEELE_CAMPUS_SITE_ID,
+            "limit": limit,
+            "offset": offset
+        }
         
-        response_length = len(device_info.get("response", []))
-        length = response_length  # Update length for loop condition
-        data.extend(device_info.get("response", []))
+        query_string = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{BASE_URL}/dna/intent/api/v1/device-health?{query_string}"
         
-        i += 1
-        if response_length == 250:  # If we got the maximum number, there might be more
-            logger.info("Received maximum number of devices, checking for more...")
-            time.sleep(2)  # Avoid API rate limits
+        try:
+            # Get fresh token for each request
+            token = auth_manager.get_token()
+            auth_headers = {
+                'x-auth-token': token,
+                'Content-Type': 'application/json'
+            }
+            
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context) as response:
+                response_data = response.read().decode('utf-8')
+                data = json.loads(response_data)
+                
+                if 'response' not in data:
+                    raise KeyError("Missing 'response' in API response")
+                
+                if total_count is None:
+                    total_count = data.get('totalCount', 0)
+                    logger.info(f"Total devices available: {total_count}")
+                
+                devices = data.get('response', [])
+                if not devices:
+                    break
+                
+                all_devices.extend(devices)
+                
+                if len(all_devices) >= total_count:
+                    break
+                
+                offset += limit
+                time.sleep(3)  # 3 seconds between requests = 20 requests per minute
+                
+        except HTTPError as e:
+            if e.code == 429:  # Too Many Requests
+                logger.warning("Rate limit hit. Waiting 60 seconds before retry...")
+                time.sleep(60)  # Wait a full minute before retrying
+                continue
+            else:
+                logger.error(f"HTTP Error: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Error fetching AP data: {e}")
+            raise
     
-    # Remove duplicates by uuid
-    unique_devices = list({device["uuid"]: device for device in data}.values())
-    logger.info(f"Total devices before deduplication: {len(data)}")
-    logger.info(f"Total unique devices after deduplication: {len(unique_devices)}")
+    logger.info(f"Retrieved {len(all_devices)} devices")
     
-    if len(unique_devices) == 0:
-        logger.warning("No APs found in the API response. This might indicate an issue with the API parameters or authentication.")
-        logger.warning(f"API URL: {DEVICE_HEALTH_URL}")
-        logger.warning(f"Site ID: {KEELE_CAMPUS_SITE_ID}")
-        logger.warning(f"Timestamp: {rounded_unix_timestamp}")
-    else:
-        logger.info("Successfully fetched AP data")
-        logger.info(f"First device sample: {json.dumps(unique_devices[0], indent=2)}")
+    # Process the devices
+    processed_devices = []
+    seen_macs = {}  # Track unique MAC addresses with their latest data
     
-    return unique_devices
+    for device in all_devices:
+        try:
+            # Get location with fallback
+            original_location = device.get("location")
+            snmp_location = device.get("snmpLocation")
+            location_name = device.get("locationName")
+            
+            # Determine effective location
+            effective_location = original_location
+            if not effective_location or len(effective_location.split('/')) < 5:
+                if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
+                    effective_location = snmp_location
+                elif location_name and location_name.strip().lower() != 'null':
+                    effective_location = location_name
+            
+            mac_address = device.get("macAddress", "Unknown")
+            
+            # Create processed device
+            processed_device = {
+                "name": device.get("name", "Unknown"),
+                "macAddress": mac_address,
+                "ipAddress": device.get("ipAddress", "Unknown"),
+                "location": original_location,  # Keep original location
+                "effectiveLocation": effective_location,  # Add effective location
+                "model": device.get("model", "Unknown"),
+                "clientCount": device.get("clientCount", {}),
+                "reachabilityHealth": device.get("reachabilityHealth", "UNKNOWN"),
+                "snmpLocation": snmp_location,
+                "locationName": location_name
+            }
+            
+            # Always deduplicate by MAC address, keeping the latest data
+            seen_macs[mac_address] = processed_device
+            
+        except Exception as e:
+            logger.error(f"Error processing device {device.get('name', 'Unknown')}: {e}")
+            continue
+    
+    # Convert the dictionary values to a list
+    processed_devices = list(seen_macs.values())
+    
+    return processed_devices
 
 def get_ap_data(auth_manager=None, retries=3):
     """

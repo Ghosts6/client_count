@@ -44,10 +44,35 @@ def test_fetch_client_counts(mock_urlopen):
 def test_fetch_ap_data(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 3,
         "response": [
-            {"uuid": "abc123", "name": "AP1"},
-            {"uuid": "abc123", "name": "AP1"},  # duplicate
-            {"uuid": "def456", "name": "AP2"}
+            {
+                "name": "AP1",
+                "macAddress": "AA:BB:CC:DD:EE:FF",
+                "ipAddress": "10.0.0.1",
+                "location": "Global/Keele Campus/Building1/Floor1",
+                "model": "Cisco AP",
+                "clientCount": {"radio0": 5, "radio1": 3},
+                "reachabilityHealth": "UP"
+            },
+            {
+                "name": "AP2",
+                "macAddress": "AA:BB:CC:DD:EE:FF",  # duplicate
+                "ipAddress": "10.0.0.2",
+                "location": "Global/Keele Campus/Building1/Floor1",
+                "model": "Cisco AP",
+                "clientCount": {"radio0": 2, "radio1": 1},
+                "reachabilityHealth": "UP"
+            },
+            {
+                "name": "AP3",
+                "macAddress": "AA:BB:CC:DD:EE:EE",
+                "ipAddress": "10.0.0.3",
+                "location": "Global/Keele Campus/Building1/Floor1",
+                "model": "Cisco AP",
+                "clientCount": {"radio0": 4, "radio1": 2},
+                "reachabilityHealth": "UP"
+            }
         ]
     }).encode()
     mock_urlopen.return_value = mock_response
@@ -55,11 +80,21 @@ def test_fetch_ap_data(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
-
-    assert isinstance(data, list)
-    assert len(data) == 2  # should remove duplicate UUIDs
-    assert {ap['uuid'] for ap in data} == {"abc123", "def456"}
+    data = fetch_ap_data(auth_manager)
+    
+    # Should only get 2 devices since one MAC address is duplicate
+    assert len(data) == 2
+    
+    # Verify the data structure and content
+    mac_addresses = {device["macAddress"] for device in data}
+    assert len(mac_addresses) == 2  # Should have 2 unique MAC addresses
+    assert "AA:BB:CC:DD:EE:FF" in mac_addresses  # First device's MAC
+    assert "AA:BB:CC:DD:EE:EE" in mac_addresses  # Third device's MAC
+    
+    # Verify the latest data is kept for the duplicate MAC
+    duplicate_device = next(device for device in data if device["macAddress"] == "AA:BB:CC:DD:EE:FF")
+    assert duplicate_device["ipAddress"] == "10.0.0.2"  # Should keep the latest data
+    assert duplicate_device["clientCount"] == {"radio0": 2, "radio1": 1}  # Should keep the latest data
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -150,13 +185,15 @@ def test_env_vars_missing():
 def test_fetch_ap_data_with_valid_location(mock_urlopen):
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 1,
         "response": [{
-            "uuid": "abc123",
             "name": "AP1",
-            "location": "Global/York University/Keele Campus/Building1/Floor1",
             "macAddress": "AA:BB:CC:DD:EE:FF",
-            "reachabilityHealth": "UP",
-            "clientCount": {"radio0": 5}
+            "ipAddress": "10.0.0.1",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "model": "Cisco AP",
+            "clientCount": {"radio0": 5},
+            "reachabilityHealth": "UP"
         }]
     }).encode()
     mock_urlopen.return_value = mock_response
@@ -164,16 +201,9 @@ def test_fetch_ap_data_with_valid_location(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
-
+    data = fetch_ap_data(auth_manager)
     assert len(data) == 1
-    ap = data[0]
-    assert ap["location"] == "Global/York University/Keele Campus/Building1/Floor1"
-    # Verify location parts are correctly parsed
-    location_parts = ap["location"].split('/')
-    assert len(location_parts) >= 5
-    assert location_parts[-2] == "Building1"  # Building name
-    assert location_parts[-1] == "Floor1"     # Floor name
+    assert data[0]["location"] == "Global/York University/Keele Campus/Building1/Floor1"
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -195,7 +225,7 @@ def test_fetch_ap_data_with_snmp_location_fallback(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
 
     assert len(data) == 1
     ap = data[0]
@@ -229,7 +259,7 @@ def test_fetch_ap_data_with_location_name_fallback(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
 
     assert len(data) == 1
     ap = data[0]
@@ -264,7 +294,7 @@ def test_fetch_ap_data_with_no_location(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
 
     assert len(data) == 1
     ap = data[0]
@@ -295,7 +325,7 @@ def test_fetch_ap_data_with_invalid_location_format(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
 
     assert len(data) == 1
     ap = data[0]
@@ -328,6 +358,7 @@ def test_fetch_ap_data_empty_response(mock_urlopen):
     """Test handling of empty API response."""
     mock_response = MagicMock()
     mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 0,
         "response": []
     }).encode()
     mock_urlopen.return_value = mock_response
@@ -335,7 +366,7 @@ def test_fetch_ap_data_empty_response(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
     assert len(data) == 0
 
 
@@ -351,8 +382,8 @@ def test_fetch_ap_data_malformed_response(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
-    assert len(data) == 0
+    with pytest.raises(KeyError):
+        fetch_ap_data(auth_manager)
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -360,26 +391,28 @@ def test_fetch_ap_data_with_retry(mock_urlopen):
     """Test retry mechanism for API failures."""
     # First attempt fails, second succeeds
     fail_response = MagicMock()
-    fail_response.__enter__.side_effect = HTTPError(None, 500, "Server Error", None, None)
-    
+    fail_response.__enter__.side_effect = HTTPError(None, 429, "Too Many Requests", None, None)
+
     success_response = MagicMock()
     success_response.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 1,
         "response": [{
-            "uuid": "abc123",
             "name": "AP1",
-            "location": "Global/York University/Keele Campus/Building1/Floor1",
             "macAddress": "AA:BB:CC:DD:EE:FF",
-            "reachabilityHealth": "UP",
-            "clientCount": {"radio0": 5}
+            "ipAddress": "10.0.0.1",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "model": "Cisco AP",
+            "clientCount": {"radio0": 5},
+            "reachabilityHealth": "UP"
         }]
     }).encode()
-    
+
     mock_urlopen.side_effect = [fail_response, success_response]
 
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=2)
+    data = fetch_ap_data(auth_manager)
     assert len(data) == 1
     assert data[0]["name"] == "AP1"
 
@@ -387,39 +420,45 @@ def test_fetch_ap_data_with_retry(mock_urlopen):
 @patch("ap_monitor.app.dna_api.urlopen")
 def test_fetch_ap_data_pagination(mock_urlopen):
     """Test handling of paginated API responses."""
-    # First page with 250 items
+    # First page with 100 items
     first_page = MagicMock()
     first_page.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 150,
         "response": [{
-            "uuid": f"uuid_{i}",
             "name": f"AP{i}",
-            "location": "Global/York University/Keele Campus/Building1/Floor1",
             "macAddress": f"AA:BB:CC:DD:EE:{i:02x}",
-            "reachabilityHealth": "UP",
-            "clientCount": {"radio0": 5}
-        } for i in range(250)]
+            "ipAddress": f"10.0.0.{i}",
+            "location": "Global/Keele Campus/Building1/Floor1",
+            "model": "Cisco AP",
+            "clientCount": {"radio0": 5},
+            "reachabilityHealth": "UP"
+        } for i in range(100)]
     }).encode()
-    
-    # Second page with 100 items
+
+    # Second page with 50 items
     second_page = MagicMock()
     second_page.__enter__.return_value.read.return_value = json.dumps({
+        "totalCount": 150,
         "response": [{
-            "uuid": f"uuid_{i}",
             "name": f"AP{i}",
-            "location": "Global/York University/Keele Campus/Building1/Floor1",
             "macAddress": f"AA:BB:CC:DD:EE:{i:02x}",
-            "reachabilityHealth": "UP",
-            "clientCount": {"radio0": 5}
-        } for i in range(250, 350)]
+            "ipAddress": f"10.0.0.{i}",
+            "location": "Global/Keele Campus/Building1/Floor1",
+            "model": "Cisco AP",
+            "clientCount": {"radio0": 5},
+            "reachabilityHealth": "UP"
+        } for i in range(100, 150)]
     }).encode()
-    
+
     mock_urlopen.side_effect = [first_page, second_page]
 
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
-    assert len(data) == 350  # Total of both pages
+    data = fetch_ap_data(auth_manager)
+    assert len(data) == 150
+    assert data[0]["name"] == "AP0"
+    assert data[149]["name"] == "AP149"
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -451,7 +490,7 @@ def test_fetch_ap_data_duplicate_handling(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
     assert len(data) == 1  # Should remove duplicate
 
 
@@ -484,5 +523,5 @@ def test_fetch_ap_data_missing_required_fields(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
 
-    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    data = fetch_ap_data(auth_manager)
     assert len(data) == 2  # Should still return both APs, let the processing layer handle missing fields

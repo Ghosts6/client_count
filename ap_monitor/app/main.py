@@ -140,14 +140,25 @@ def update_ap_data_task(db: Session = None):
         logger.info(f"Fetched {len(aps)} APs from DNAC API")
         
         for ap in aps:
-            location = ap.get('location', '')
-            location_parts = location.split('/')
-            if len(location_parts) < 5:
-                logger.warning(f"Skipping device {ap.get('name')} due to invalid location format: {location}")
+            # Try to get location from multiple fields
+            location = ap.get('location')
+            if not location or len(location.split('/')) < 5:
+                # Fallback to snmpLocation if available and not default
+                snmp_location = ap.get('snmpLocation')
+                if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
+                    location = snmp_location
+                else:
+                    # Fallback to locationName if available and not null
+                    location_name = ap.get('locationName')
+                    if location_name and location_name.strip().lower() != 'null':
+                        location = location_name
+            location_parts = location.split('/') if location else []
+            if len(location_parts) < 2:
+                logger.warning(f"Skipping device {ap.get('name')} due to missing or invalid location fields. location: {location}")
                 continue
-                
-            building_name = location_parts[3]
-            floor_name = location_parts[4]
+            # Use last two parts as building and floor if possible
+            building_name = location_parts[-2] if len(location_parts) >= 2 else 'Unknown'
+            floor_name = location_parts[-1] if len(location_parts) >= 1 else 'Unknown'
             logger.debug(f"Processing AP: {ap.get('name')} in Building: {building_name}, Floor: {floor_name}")
             
             # Find or create building

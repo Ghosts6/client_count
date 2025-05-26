@@ -56,6 +56,8 @@ class AuthManager:
         self.auth_headers = auth_headers
         self.token = None
         self.token_expiry = None
+        logger.info(f"Initializing AuthManager with URL: {auth_url}")
+        logger.info(f"Auth headers (excluding credentials): {dict(filter(lambda x: x[0] != 'Authorization', auth_headers.items()))}")
     
     def get_token(self):
         """Get a valid authentication token, refreshing if necessary."""
@@ -68,9 +70,15 @@ class AuthManager:
                     if response.status == 200:
                         response_data = json.load(response)
                         self.token = response_data.get("Token")
+                        if not self.token:
+                            logger.error("No token in response data")
+                            logger.error(f"Response data: {response_data}")
+                            raise Exception("No token in response data")
                         self.token_expiry = current_time + timedelta(minutes=55)
                         logger.info("Authentication token successfully refreshed")
+                        logger.debug(f"Token expiry set to: {self.token_expiry}")
                     else:
+                        logger.error(f"Failed to obtain access token. Status: {response.status}")
                         raise Exception(f"Failed to obtain access token: {response.status}")
             except HTTPError as e:
                 logger.error(f"HTTP Error while obtaining access token: {e.code} - {e.reason}")
@@ -144,6 +152,9 @@ def fetch_ap_data(auth_manager, rounded_unix_timestamp, retries=3):
     i = 0
     length = 250  # Initial value to enter the loop
     
+    logger.info(f"Starting AP data fetch with timestamp: {rounded_unix_timestamp}")
+    logger.info(f"Using site ID: {KEELE_CAMPUS_SITE_ID}")
+    
     while length == 250:  # Continue until we get less than 250 devices (pagination)
         params = {
             "deviceRole": "AP", 
@@ -160,36 +171,63 @@ def fetch_ap_data(auth_manager, rounded_unix_timestamp, retries=3):
         attempt = 0
         while attempt < retries:
             try:
+                logger.info(f"Making API request {i + 1} with params: {params}")
                 with urlopen(req, context=ssl_context, timeout=60) as response:
                     device_info = json.load(response)
+                    logger.info(f"API Response for request {i + 1}: {json.dumps(device_info, indent=2)}")
+                    
+                    # Log response statistics
+                    response_data = device_info.get("response", [])
+                    logger.info(f"Response {i + 1} contains {len(response_data)} devices")
+                    if response_data:
+                        sample_device = response_data[0]
+                        logger.info(f"Sample device data: {json.dumps(sample_device, indent=2)}")
+                    
                     break  # Exit retry loop if successful
             except (HTTPError, URLError) as e:
                 attempt += 1
-                logger.warning(f"{type(e).__name__} (attempt {attempt}): {e}")
+                logger.warning(f"{type(e).__name__} (attempt {attempt}/{retries}): {e}")
                 if attempt < retries:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    wait_time = 2 ** attempt
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)  # Exponential backoff
                 else:
                     logger.error(f"Failed due to {type(e).__name__} after {retries} attempts: {e}")
                     raise
             except Exception as e:
                 attempt += 1
-                logger.warning(f"General error (attempt {attempt}): {e}")
+                logger.warning(f"General error (attempt {attempt}/{retries}): {e}")
                 if attempt < retries:
-                    time.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    logger.info(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
                 else:
                     logger.error(f"Failed due to general error after {retries} attempts: {e}")
                     raise
         
-        response_length = len(device_info["response"])
+        response_length = len(device_info.get("response", []))
         length = response_length  # Update length for loop condition
-        data.extend(device_info["response"])
+        data.extend(device_info.get("response", []))
         
         i += 1
         if response_length == 250:  # If we got the maximum number, there might be more
+            logger.info("Received maximum number of devices, checking for more...")
             time.sleep(2)  # Avoid API rate limits
     
     # Remove duplicates by uuid
     unique_devices = list({device["uuid"]: device for device in data}.values())
+    logger.info(f"Total devices before deduplication: {len(data)}")
+    logger.info(f"Total unique devices after deduplication: {len(unique_devices)}")
+    
+    if len(unique_devices) == 0:
+        logger.warning("No APs found in the API response. This might indicate an issue with the API parameters or authentication.")
+        logger.warning(f"API URL: {DEVICE_HEALTH_URL}")
+        logger.warning(f"Site ID: {KEELE_CAMPUS_SITE_ID}")
+        logger.warning(f"Timestamp: {rounded_unix_timestamp}")
+    else:
+        logger.info("Successfully fetched AP data")
+        logger.info(f"First device sample: {json.dumps(unique_devices[0], indent=2)}")
+    
     return unique_devices
 
 def get_ap_data(auth_manager=None, retries=3):
@@ -254,13 +292,22 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
         radioId_map = {r.radioname: r.radioid for r in session.query(RadioType).all()}
         for device in device_info_list:
             ap_name = device['name']
-            location = device.get('location', '')
-            location_parts = location.split('/')
-            if len(location_parts) < 5:
-                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+            # Try to get location from multiple fields
+            location = device.get('location')
+            if not location or len(location.split('/')) < 5:
+                snmp_location = device.get('snmpLocation')
+                if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
+                    location = snmp_location
+                else:
+                    location_name = device.get('locationName')
+                    if location_name and location_name.strip().lower() != 'null':
+                        location = location_name
+            location_parts = location.split('/') if location else []
+            if len(location_parts) < 2:
+                logger.warning(f"Skipping device {ap_name} due to missing or invalid location fields. location: {location}")
                 continue
-            building_name = location_parts[3]
-            floor_name = location_parts[4]
+            building_name = location_parts[-2] if len(location_parts) >= 2 else 'Unknown'
+            floor_name = location_parts[-1] if len(location_parts) >= 1 else 'Unknown'
             # Building
             building = session.query(ApBuilding).filter_by(buildingname=building_name).first()
             if not building:

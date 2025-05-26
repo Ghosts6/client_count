@@ -97,6 +97,8 @@ DB_USER=postgres
 DB_PASSWORD=your_password
 DB_PORT=3306
 
+APCLIENT_DB_URL=postgresql://postgres:your_password@localhost:3306/apclientcount
+
 # DNA Center API Configuration
 DNA_API_URL=https://your-dnac-host/dna/intent/api/v1/
 DNA_USERNAME=your_username

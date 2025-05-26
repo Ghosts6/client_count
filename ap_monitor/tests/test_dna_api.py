@@ -144,3 +144,345 @@ def test_env_vars_missing():
     with patch("ap_monitor.app.dna_api.AuthManager.__init__", side_effect=ValueError("DNA_USERNAME and DNA_PASSWORD must be set in .env file")):
         with pytest.raises(ValueError, match="DNA_USERNAME and DNA_PASSWORD must be set"):
             AuthManager()
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_valid_location(mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+
+    assert len(data) == 1
+    ap = data[0]
+    assert ap["location"] == "Global/York University/Keele Campus/Building1/Floor1"
+    # Verify location parts are correctly parsed
+    location_parts = ap["location"].split('/')
+    assert len(location_parts) >= 5
+    assert location_parts[-2] == "Building1"  # Building name
+    assert location_parts[-1] == "Floor1"     # Floor name
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_snmp_location_fallback(mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": None,
+            "snmpLocation": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+
+    assert len(data) == 1
+    ap = data[0]
+    # Verify snmpLocation is used as fallback
+    assert ap["location"] is None
+    assert ap["snmpLocation"] == "Global/York University/Keele Campus/Building1/Floor1"
+    # Verify location parts are correctly parsed from snmpLocation
+    location_parts = ap["snmpLocation"].split('/')
+    assert len(location_parts) >= 5
+    assert location_parts[-2] == "Building1"  # Building name
+    assert location_parts[-1] == "Floor1"     # Floor name
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_location_name_fallback(mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": None,
+            "snmpLocation": "default location",
+            "locationName": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+
+    assert len(data) == 1
+    ap = data[0]
+    # Verify locationName is used as fallback
+    assert ap["location"] is None
+    assert ap["snmpLocation"] == "default location"
+    assert ap["locationName"] == "Global/York University/Keele Campus/Building1/Floor1"
+    # Verify location parts are correctly parsed from locationName
+    location_parts = ap["locationName"].split('/')
+    assert len(location_parts) >= 5
+    assert location_parts[-2] == "Building1"  # Building name
+    assert location_parts[-1] == "Floor1"     # Floor name
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_no_location(mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": None,
+            "snmpLocation": "default location",
+            "locationName": "null",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+
+    assert len(data) == 1
+    ap = data[0]
+    # Verify all location fields are invalid
+    assert ap["location"] is None
+    assert ap["snmpLocation"] == "default location"
+    assert ap["locationName"] == "null"
+    # Verify no valid location parts can be extracted
+    assert not any(loc and loc.lower() != "default location" and loc.lower() != "null" 
+                  for loc in [ap["location"], ap["snmpLocation"], ap["locationName"]])
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_invalid_location_format(mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": "Invalid/Location/Format",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+
+    assert len(data) == 1
+    ap = data[0]
+    # Verify location format is invalid
+    assert ap["location"] == "Invalid/Location/Format"
+    location_parts = ap["location"].split('/')
+    assert len(location_parts) < 5  # Invalid format should have fewer than 5 parts
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+@patch.dict("os.environ", {
+    "DNA_USERNAME": "test_user",
+    "DNA_PASSWORD": "test_pass",
+    "DNA_API_URL": "https://test.dnac.com"
+}, clear=True)
+def test_auth_manager_initialization(mock_urlopen):
+    """Test AuthManager initialization with environment variables."""
+    # Reload the module to pick up the new environment variables
+    import importlib
+    import ap_monitor.app.dna_api
+    importlib.reload(ap_monitor.app.dna_api)
+    
+    auth = ap_monitor.app.dna_api.AuthManager()
+    assert auth.auth_url == "https://test.dnac.com/dna/system/api/v1/auth/token"
+    assert "Basic" in auth.auth_headers["Authorization"]
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_empty_response(mock_urlopen):
+    """Test handling of empty API response."""
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": []
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    assert len(data) == 0
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_malformed_response(mock_urlopen):
+    """Test handling of malformed API response."""
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "error": "Invalid response format"
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    assert len(data) == 0
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_with_retry(mock_urlopen):
+    """Test retry mechanism for API failures."""
+    # First attempt fails, second succeeds
+    fail_response = MagicMock()
+    fail_response.__enter__.side_effect = HTTPError(None, 500, "Server Error", None, None)
+    
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": "abc123",
+            "name": "AP1",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        }]
+    }).encode()
+    
+    mock_urlopen.side_effect = [fail_response, success_response]
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=2)
+    assert len(data) == 1
+    assert data[0]["name"] == "AP1"
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_pagination(mock_urlopen):
+    """Test handling of paginated API responses."""
+    # First page with 250 items
+    first_page = MagicMock()
+    first_page.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": f"uuid_{i}",
+            "name": f"AP{i}",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": f"AA:BB:CC:DD:EE:{i:02x}",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        } for i in range(250)]
+    }).encode()
+    
+    # Second page with 100 items
+    second_page = MagicMock()
+    second_page.__enter__.return_value.read.return_value = json.dumps({
+        "response": [{
+            "uuid": f"uuid_{i}",
+            "name": f"AP{i}",
+            "location": "Global/York University/Keele Campus/Building1/Floor1",
+            "macAddress": f"AA:BB:CC:DD:EE:{i:02x}",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 5}
+        } for i in range(250, 350)]
+    }).encode()
+    
+    mock_urlopen.side_effect = [first_page, second_page]
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    assert len(data) == 350  # Total of both pages
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_duplicate_handling(mock_urlopen):
+    """Test handling of duplicate AP entries."""
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "uuid": "abc123",
+                "name": "AP1",
+                "location": "Global/York University/Keele Campus/Building1/Floor1",
+                "macAddress": "AA:BB:CC:DD:EE:FF",
+                "reachabilityHealth": "UP",
+                "clientCount": {"radio0": 5}
+            },
+            {
+                "uuid": "abc123",  # Duplicate UUID
+                "name": "AP1",
+                "location": "Global/York University/Keele Campus/Building1/Floor1",
+                "macAddress": "AA:BB:CC:DD:EE:FF",
+                "reachabilityHealth": "UP",
+                "clientCount": {"radio0": 5}
+            }
+        ]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    assert len(data) == 1  # Should remove duplicate
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_data_missing_required_fields(mock_urlopen):
+    """Test handling of AP data with missing required fields."""
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "uuid": "abc123",
+                "name": "AP1",
+                # Missing location
+                "macAddress": "AA:BB:CC:DD:EE:FF",
+                "reachabilityHealth": "UP",
+                "clientCount": {"radio0": 5}
+            },
+            {
+                "uuid": "def456",
+                "name": "AP2",
+                "location": "Global/York University/Keele Campus/Building1/Floor1",
+                # Missing macAddress
+                "reachabilityHealth": "UP",
+                "clientCount": {"radio0": 5}
+            }
+        ]
+    }).encode()
+    mock_urlopen.return_value = mock_response
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_ap_data(auth_manager, 1715000000000, retries=1)
+    assert len(data) == 2  # Should still return both APs, let the processing layer handle missing fields

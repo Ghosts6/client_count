@@ -9,170 +9,256 @@ import time
 from decimal import Decimal
 import ipaddress
 
-# Tests for wireless_count schema
-def test_create_campus_and_building(session):
-    campus = Campus(campus_name="Main Campus")
-    session.add(campus)
-    session.commit()
-    
-    building = Building(
-        building_name="Engineering Building",
-        campus_id=campus.campus_id,
-        latitude=37.7749,
-        longitude=-122.4194
-    )
-    session.add(building)
-    session.commit()
-    
-    assert building.building_id is not None
-    assert building.campus.campus_name == "Main Campus"
+@pytest.fixture(autouse=True)
+def cleanup_database(wireless_db, apclient_db):
+    """Clean up the database before each test."""
+    # Clean wireless_count database
+    wireless_db.query(ClientCount).delete()
+    wireless_db.query(Building).delete()
+    wireless_db.query(Campus).delete()
+    wireless_db.commit()
 
-def test_create_client_count(session):
-    campus = Campus(campus_name="North Campus")
-    session.add(campus)
-    session.commit()
-    
+    # Clean apclientcount database
+    apclient_db.query(ClientCountAP).delete()
+    apclient_db.query(AccessPoint).delete()
+    apclient_db.query(Room).delete()
+    apclient_db.query(Floor).delete()
+    apclient_db.query(ApBuilding).delete()
+    apclient_db.query(RadioType).delete()
+    apclient_db.commit()
+
+def test_create_campus(wireless_db):
+    """Test creating a campus."""
+    campus = Campus(campus_name="Test Campus 1")
+    wireless_db.add(campus)
+    wireless_db.commit()
+    assert campus.campus_id is not None
+    assert campus.campus_name == "Test Campus 1"
+
+def test_create_building(wireless_db):
+    """Test creating a building."""
+    # Create campus first
+    campus = Campus(campus_name="Test Campus 2")
+    wireless_db.add(campus)
+    wireless_db.commit()
+
+    # Create building
     building = Building(
-        building_name="Science Building",
+        building_name="Test Building 1",
         campus_id=campus.campus_id,
         latitude=37.7749,
         longitude=-122.4194
     )
-    session.add(building)
-    session.commit()
-    
+    wireless_db.add(building)
+    wireless_db.commit()
+    assert building.building_id is not None
+    assert building.building_name == "Test Building 1"
+    assert building.campus_id == campus.campus_id
+
+def test_create_client_count(wireless_db):
+    """Test creating a client count."""
+    # Create campus and building
+    campus = Campus(campus_name="Test Campus 3")
+    wireless_db.add(campus)
+    wireless_db.commit()
+
+    building = Building(
+        building_name="Test Building 2",
+        campus_id=campus.campus_id,
+        latitude=37.7749,
+        longitude=-122.4194
+    )
+    wireless_db.add(building)
+    wireless_db.commit()
+
+    # Create client count
     client_count = ClientCount(
         building_id=building.building_id,
-        client_count=50
+        client_count=10
     )
-    session.add(client_count)
-    session.commit()
-    
+    wireless_db.add(client_count)
+    wireless_db.commit()
     assert client_count.count_id is not None
-    assert client_count.client_count == 50
+    assert client_count.client_count == 10
+    assert client_count.building_id == building.building_id
 
-# Tests for apclientcount schema
-def test_create_ap_building_and_floor(session):
-    building = ApBuilding(buildingname="Main Hall")
-    session.add(building)
-    session.commit()
-    
-    floor = Floor(floorname="1", buildingid=building.buildingid)
-    session.add(floor)
-    session.commit()
-    
-    assert floor.floorid is not None
-    assert floor.building.buildingname == "Main Hall"
+def test_create_room_and_access_point(apclient_db):
+    """Test creating a room and access point."""
+    # Create building, floor, and room
+    building = ApBuilding(buildingname="Test Building 3")
+    apclient_db.add(building)
+    apclient_db.commit()
 
-def test_create_room_and_access_point(session):
-    building = ApBuilding(buildingname="Main Hall")
-    session.add(building)
-    session.commit()
-    
-    floor = Floor(floorname="1", buildingid=building.buildingid)
-    session.add(floor)
-    session.commit()
-    
-    room = Room(roomname="Lab A", floorid=floor.floorid)
-    session.add(room)
-    session.commit()
-    
-    # Convert IP address to string for SQLite compatibility
-    ip_str = str(ipaddress.ip_address("192.168.1.100"))
+    floor = Floor(floorname="1st Floor", buildingid=building.buildingid)
+    apclient_db.add(floor)
+    apclient_db.commit()
+
+    room = Room(roomname="Room 101", floorid=floor.floorid)
+    apclient_db.add(room)
+    apclient_db.commit()
+
+    # Create access point
     ap = AccessPoint(
-        apname="AP-SH-1",
-        macaddress="11:22:33:44:55:66",
-        ipaddress=ip_str,
-        modelname="Cisco 3800",
+        apname="AP-01",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="Cisco AP",
         isactive=True,
+        buildingid=building.buildingid,
         floorid=floor.floorid,
-        roomid=room.roomid,
-        buildingid=building.buildingid
+        roomid=room.roomid
     )
-    session.add(ap)
-    session.commit()
-    
+    apclient_db.add(ap)
+    apclient_db.commit()
     assert ap.apid is not None
-    assert ap.apname == "AP-SH-1"
+    assert ap.apname == "AP-01"
+    assert ap.macaddress == "00:11:22:33:44:55"
 
-def test_create_radio_and_client_count(session):
-    radio = RadioType(radioname="5GHz")
-    session.add(radio)
-    session.commit()
-    
-    building = ApBuilding(buildingname="Test Building")
-    session.add(building)
-    session.commit()
-    
-    floor = Floor(floorname="1", buildingid=building.buildingid)
-    session.add(floor)
-    session.commit()
-    
+def test_create_radio_and_client_count(apclient_db):
+    """Test creating a radio type and client count."""
+    # Create building, floor, room, and AP
+    building = ApBuilding(buildingname="Test Building 4")
+    apclient_db.add(building)
+    apclient_db.commit()
+
+    floor = Floor(floorname="2nd Floor", buildingid=building.buildingid)
+    apclient_db.add(floor)
+    apclient_db.commit()
+
+    room = Room(roomname="Room 201", floorid=floor.floorid)
+    apclient_db.add(room)
+    apclient_db.commit()
+
     ap = AccessPoint(
-        apname="TestAP",
-        macaddress="FF:EE:DD:CC:BB:AA",
+        apname="AP-02",
+        macaddress="00:11:22:33:44:66",
+        ipaddress="192.168.1.2",
+        modelname="Cisco AP",
+        isactive=True,
+        buildingid=building.buildingid,
         floorid=floor.floorid,
-        buildingid=building.buildingid
+        roomid=room.roomid
     )
-    session.add(ap)
-    session.commit()
-    
+    apclient_db.add(ap)
+    apclient_db.commit()
+
+    # Create radio type
+    radio = RadioType(radioname="2.4GHz")
+    apclient_db.add(radio)
+    apclient_db.commit()
+
+    # Create client count
     client_count = ClientCountAP(
         apid=ap.apid,
         radioid=radio.radioid,
-        clientcount=10,
-        timestamp=datetime.now(timezone.utc)
+        clientcount=5,
+        timestamp=datetime.utcnow()
     )
-    session.add(client_count)
-    session.commit()
-    
+    apclient_db.add(client_count)
+    apclient_db.commit()
     assert client_count.countid is not None
-    assert client_count.clientcount == 10
+    assert client_count.clientcount == 5
+    assert client_count.apid == ap.apid
+    assert client_count.radioid == radio.radioid
 
-def test_unique_constraints(session):
-    # Test unique campus name
-    campus1 = Campus(campus_name="Unique Campus")
-    session.add(campus1)
-    session.commit()
+def test_unique_constraints(wireless_db, apclient_db):
+    """Test unique constraints."""
+    # Test campus name uniqueness
+    campus1 = Campus(campus_name="Test Campus 5")
+    wireless_db.add(campus1)
+    wireless_db.commit()
 
-    # Try to create another campus with the same name
-    campus2 = Campus(campus_name="Unique Campus")
-    session.add(campus2)
-    
-    # This should raise an IntegrityError
-    with pytest.raises(Exception) as exc_info:
-        session.commit()
-    assert "UNIQUE constraint failed" in str(exc_info.value)
+    campus2 = Campus(campus_name="Test Campus 5")
+    wireless_db.add(campus2)
+    with pytest.raises(IntegrityError):
+        wireless_db.commit()
+    wireless_db.rollback()
 
-def test_cascade_delete(session):
-    # Test cascade delete for AP building
-    building = ApBuilding(buildingname="CascadeTest")
-    session.add(building)
-    session.commit()
-    
-    floor = Floor(floorname="1", buildingid=building.buildingid)
-    session.add(floor)
-    session.commit()
-    
-    room = Room(roomname="Test Room", floorid=floor.floorid)
-    session.add(room)
-    session.commit()
-    
-    ap = AccessPoint(
-        apname="TestAP",
-        macaddress="11:22:33:44:55:66",
-        floorid=floor.floorid,
-        roomid=room.roomid,
-        buildingid=building.buildingid
+    # Test building name uniqueness
+    building1 = ApBuilding(buildingname="Test Building 5")
+    apclient_db.add(building1)
+    apclient_db.commit()
+
+    building2 = ApBuilding(buildingname="Test Building 5")
+    apclient_db.add(building2)
+    with pytest.raises(IntegrityError):
+        apclient_db.commit()
+    apclient_db.rollback()
+
+def test_cascade_delete(wireless_db, apclient_db):
+    """Test cascade delete functionality."""
+    # Test wireless_count cascade
+    campus = Campus(campus_name="Test Campus 6")
+    wireless_db.add(campus)
+    wireless_db.commit()
+
+    building = Building(
+        building_name="Test Building 6",
+        campus_id=campus.campus_id,
+        latitude=37.7749,
+        longitude=-122.4194
     )
-    session.add(ap)
-    session.commit()
-    
-    # Delete the building
-    session.delete(building)
-    session.commit()
-    
-    # Verify cascade delete
-    assert session.query(Floor).filter_by(floorid=floor.floorid).first() is None
-    assert session.query(Room).filter_by(roomid=room.roomid).first() is None
-    assert session.query(AccessPoint).filter_by(apid=ap.apid).first() is None
+    wireless_db.add(building)
+    wireless_db.commit()
+
+    client_count = ClientCount(
+        building_id=building.building_id,
+        client_count=10
+    )
+    wireless_db.add(client_count)
+    wireless_db.commit()
+
+    # Delete campus and verify cascade
+    wireless_db.delete(campus)
+    wireless_db.commit()
+
+    assert wireless_db.query(Building).filter_by(building_id=building.building_id).first() is None
+    assert wireless_db.query(ClientCount).filter_by(count_id=client_count.count_id).first() is None
+
+    # Test apclientcount cascade
+    building = ApBuilding(buildingname="Test Building 7")
+    apclient_db.add(building)
+    apclient_db.commit()
+
+    floor = Floor(floorname="3rd Floor", buildingid=building.buildingid)
+    apclient_db.add(floor)
+    apclient_db.commit()
+
+    room = Room(roomname="Room 301", floorid=floor.floorid)
+    apclient_db.add(room)
+    apclient_db.commit()
+
+    ap = AccessPoint(
+        apname="AP-03",
+        macaddress="00:11:22:33:44:77",
+        ipaddress="192.168.1.3",
+        modelname="Cisco AP",
+        isactive=True,
+        buildingid=building.buildingid,
+        floorid=floor.floorid,
+        roomid=room.roomid
+    )
+    apclient_db.add(ap)
+    apclient_db.commit()
+
+    radio = RadioType(radioname="5GHz")
+    apclient_db.add(radio)
+    apclient_db.commit()
+
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=5,
+        timestamp=datetime.utcnow()
+    )
+    apclient_db.add(client_count)
+    apclient_db.commit()
+
+    # Delete building and verify cascade
+    apclient_db.delete(building)
+    apclient_db.commit()
+
+    assert apclient_db.query(Floor).filter_by(floorid=floor.floorid).first() is None
+    assert apclient_db.query(Room).filter_by(roomid=room.roomid).first() is None
+    assert apclient_db.query(AccessPoint).filter_by(apid=ap.apid).first() is None
+    assert apclient_db.query(ClientCountAP).filter_by(countid=client_count.countid).first() is None

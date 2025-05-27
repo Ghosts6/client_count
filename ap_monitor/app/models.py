@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, B
 from sqlalchemy.dialects.postgresql import MACADDR, INET
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from ap_monitor.app.db import Base
+from ap_monitor.app.db import WirelessBase, APClientBase
 import os
 
 if os.getenv("TESTING", "false").lower() == "true":
@@ -14,17 +14,17 @@ else:
     INET_TYPE = INET
 
 # wireless_count DB models
-class Campus(Base):
+class Campus(WirelessBase):
     __tablename__ = "campuses"
     campus_id = Column(Integer, primary_key=True, autoincrement=True)
     campus_name = Column(String(100), nullable=False, unique=True)
     buildings = relationship("Building", back_populates="campus", cascade="all, delete-orphan")
 
-class Building(Base):
+class Building(WirelessBase):
     __tablename__ = "buildings"
     building_id = Column(Integer, primary_key=True, autoincrement=True)
     building_name = Column(String(100), nullable=False)
-    campus_id = Column(Integer, ForeignKey("campuses.campus_id", ondelete="CASCADE"), nullable=False)
+    campus_id = Column(Integer, ForeignKey("campuses.campus_id"), nullable=False)
     latitude = Column(Numeric(15, 10), nullable=False)
     longitude = Column(Numeric(15, 10), nullable=False)
     campus = relationship("Campus", back_populates="buildings")
@@ -34,46 +34,50 @@ class Building(Base):
         {'extend_existing': True},
     )
 
-class ClientCount(Base):
+class ClientCount(WirelessBase):
     __tablename__ = "client_counts"
     count_id = Column(Integer, primary_key=True, autoincrement=True)
-    building_id = Column(Integer, ForeignKey("buildings.building_id", ondelete="CASCADE"), nullable=False)
+    building_id = Column(Integer, ForeignKey("buildings.building_id"), nullable=False)
     client_count = Column(Integer, nullable=False)
     time_inserted = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     building = relationship("Building", back_populates="client_counts")
 
 # apclientcount DB models
-class ApBuilding(Base):
-    __tablename__ = "ap_buildings"
+class ApBuilding(APClientBase):
+    __tablename__ = "buildings"
     buildingid = Column(Integer, primary_key=True, autoincrement=True)
-    buildingname = Column(String(255), nullable=False)
+    buildingname = Column(String(255), nullable=False, unique=True)
     floors = relationship("Floor", back_populates="building", cascade="all, delete-orphan")
 
-class Floor(Base):
+class Floor(APClientBase):
     __tablename__ = "floors"
     floorid = Column(Integer, primary_key=True, autoincrement=True)
-    buildingid = Column(Integer, ForeignKey("ap_buildings.buildingid", ondelete="CASCADE"))
+    buildingid = Column(Integer, ForeignKey("buildings.buildingid"))
     floorname = Column(String(50), nullable=False)
     building = relationship("ApBuilding", back_populates="floors")
     rooms = relationship("Room", back_populates="floor", cascade="all, delete-orphan")
     accesspoints = relationship("AccessPoint", back_populates="floor", cascade="all, delete-orphan")
 
-class Room(Base):
+    __table_args__ = (
+        {'extend_existing': True},
+    )
+
+class Room(APClientBase):
     __tablename__ = "rooms"
     roomid = Column(Integer, primary_key=True, autoincrement=True)
-    floorid = Column(Integer, ForeignKey("floors.floorid", ondelete="CASCADE"))
+    floorid = Column(Integer, ForeignKey("floors.floorid"))
     roomname = Column(String(100), nullable=False)
     floor = relationship("Floor", back_populates="rooms")
     accesspoints = relationship("AccessPoint", back_populates="room", cascade="all, delete-orphan")
 
-class AccessPoint(Base):
+class AccessPoint(APClientBase):
     __tablename__ = "accesspoints"
     apid = Column(Integer, primary_key=True, autoincrement=True)
-    buildingid = Column(Integer, ForeignKey("ap_buildings.buildingid", ondelete="CASCADE"))
-    floorid = Column(Integer, ForeignKey("floors.floorid", ondelete="CASCADE"))
-    roomid = Column(Integer, ForeignKey("rooms.roomid", ondelete="CASCADE"))
+    buildingid = Column(Integer, ForeignKey("buildings.buildingid"))
+    floorid = Column(Integer, ForeignKey("floors.floorid"))
+    roomid = Column(Integer, ForeignKey("rooms.roomid"))
     apname = Column(String(40), nullable=False)
-    macaddress = Column(MACADDR_TYPE)
+    macaddress = Column(MACADDR_TYPE, unique=True)
     ipaddress = Column(INET_TYPE)
     modelname = Column(String(60))
     isactive = Column(Boolean, default=True)
@@ -81,22 +85,22 @@ class AccessPoint(Base):
     room = relationship("Room", back_populates="accesspoints")
     clientcounts = relationship("ClientCountAP", back_populates="accesspoint", cascade="all, delete-orphan")
 
-class RadioType(Base):
+class RadioType(APClientBase):
     __tablename__ = "radiotypes"
     radioid = Column(Integer, primary_key=True, autoincrement=True)
-    radioname = Column(String(50), nullable=False)
+    radioname = Column(String(50), nullable=False, unique=True)
     clientcounts = relationship("ClientCountAP", back_populates="radio", cascade="all, delete-orphan")
 
-class ClientCountAP(Base):
+class ClientCountAP(APClientBase):
     __tablename__ = "clientcount"
-    countid = Column(Integer, primary_key=True, autoincrement=True)
-    apid = Column(Integer, ForeignKey("accesspoints.apid", ondelete="CASCADE"))
-    radioid = Column(Integer, ForeignKey("radiotypes.radioid", ondelete="CASCADE"))
+    countid = Column(Integer if os.getenv("TESTING", "false").lower() == "true" else BigInteger, primary_key=True, autoincrement=True)
+    apid = Column(Integer, ForeignKey("accesspoints.apid"))
+    radioid = Column(Integer, ForeignKey("radiotypes.radioid"))
     clientcount = Column(Integer, nullable=False)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     accesspoint = relationship("AccessPoint", back_populates="clientcounts")
     radio = relationship("RadioType", back_populates="clientcounts")
 
     __table_args__ = (
-        {'sqlite_autoincrement': True},
+        {'extend_existing': True},
     )

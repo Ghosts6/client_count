@@ -8,16 +8,28 @@ from sqlalchemy.exc import SQLAlchemyError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.ext.declarative import declarative_base
 import os
 
-from ap_monitor.app.db import get_db, init_db
-from ap_monitor.app.models import AccessPoint, ClientCount, Building, Floor, Campus, ApBuilding, Room, RadioType, ClientCountAP
+from ap_monitor.app.db import get_wireless_db, get_apclient_db, init_db, WirelessBase, APClientBase
+from ap_monitor.app.models import (
+    Campus, Building, ClientCount,
+    ApBuilding, Floor, Room, AccessPoint, RadioType, ClientCountAP
+)
 from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, radio_id_map
 from ap_monitor.app.utils import setup_logging, calculate_next_run_time
-
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import scoped_session
+from ap_monitor.app.schemas import (
+    CampusCreate, CampusResponse,
+    BuildingCreate, BuildingResponse,
+    ClientCountCreate, ClientCountResponse,
+    ApBuildingCreate, ApBuildingResponse,
+    FloorCreate, FloorResponse,
+    RoomCreate, RoomResponse,
+    AccessPointCreate, AccessPointResponse,
+    RadioTypeCreate, RadioTypeResponse,
+    ClientCountAPCreate, ClientCountAPResponse
+)
 
 def get_database_url():
     if os.getenv("TESTING", "false").lower() == "true":
@@ -37,10 +49,24 @@ DATABASE_URL = get_database_url()
 engine = None
 TestingSessionLocal = None
 
+# Initialize apclientcount database only in non-test mode
+if os.getenv("TESTING", "false").lower() != "true":
+    APCLIENT_DB_URL = os.getenv("APCLIENT_DB_URL", "postgresql://postgres:@localhost:3306/apclientcount")
+    apclient_engine = create_engine(APCLIENT_DB_URL)
+    ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
+else:
+    # In test mode, use the same in-memory database for both
+    apclient_engine = None
+    ApclientSessionLocal = None
+
 def initialize_database():
     global engine, TestingSessionLocal
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+    # Initialize apclientcount database only in non-test mode
+    if os.getenv("TESTING", "false").lower() != "true":
+        WirelessBase.metadata.create_all(bind=apclient_engine)
 
 # Reinitialize the database engine and session factory
 initialize_database()
@@ -57,10 +83,6 @@ scheduler = BackgroundScheduler()
 # Create auth manager for DNA Center API
 auth_manager = AuthManager()
 
-APCLIENT_DB_URL = os.getenv("APCLIENT_DB_URL", "postgresql://postgres:@localhost:3306/apclientcount")
-apclient_engine = create_engine(APCLIENT_DB_URL)
-ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles app startup and shutdown using the FastAPI lifespan context."""
@@ -71,10 +93,11 @@ async def lifespan(app: FastAPI):
         # Initialize database
         logger.info("Initializing database...")
         init_db()
+        initialize_database()  # Initialize both databases
         logger.info("Database initialized successfully")
 
         # Initialize radio table if empty
-        with next(get_db()) as db:
+        with next(get_wireless_db()) as db:
             if db.query(RadioType).count() == 0:
                 logger.info("Initializing radio data...")
                 radios = [
@@ -129,7 +152,7 @@ def update_ap_data_task(db: Session = None):
     """Background task to update AP data in the database."""
     close_db = False
     if db is None:
-        db = next(get_db())
+        db = next(get_wireless_db())
         close_db = True
     try:
         logger.info("Running scheduled task: update_ap_data_task")
@@ -139,6 +162,7 @@ def update_ap_data_task(db: Session = None):
         aps = fetch_ap_data(auth_manager, rounded_unix_timestamp)
         logger.info(f"Fetched {len(aps)} APs from DNAC API")
         
+        # Update wireless_count DB
         for ap in aps:
             # Try to get location from multiple fields
             location = ap.get('location')
@@ -200,8 +224,8 @@ def update_ap_data_task(db: Session = None):
                 ap_record.isactive = is_active
                 ap_record.floorid = floor.floorid
                 ap_record.buildingid = building.buildingid
-            
-            # Create client count records for each radio
+
+            # Create client count records for each radio in wireless_count DB
             for radio_name, count in ap.get('clientCount', {}).items():
                 radio = db.query(RadioType).filter_by(radioname=radio_name).first()
                 if not radio:
@@ -217,7 +241,16 @@ def update_ap_data_task(db: Session = None):
                 db.add(client_count)
         
         db.commit()
-        logger.info("AP data updated successfully")
+        logger.info("AP data updated successfully in wireless_count DB")
+
+        # Update apclientcount DB
+        if os.getenv("TESTING", "false").lower() != "true":
+            try:
+                insert_apclientcount_data(aps, now)
+                logger.info("AP data updated successfully in apclientcount DB")
+            except Exception as e:
+                logger.error(f"Error updating apclientcount DB: {e}")
+
     except Exception as e:
         db.rollback()
         logger.error(f"Error updating AP data: {e}")
@@ -238,7 +271,7 @@ def update_client_count_task(db: Session = None):
     """Background task to update client count data in the database."""
     close_db = False
     if db is None:
-        db = next(get_db())
+        db = next(get_wireless_db())
         close_db = True
     try:
         logger.info("Running scheduled task: update_client_count_task")
@@ -249,7 +282,7 @@ def update_client_count_task(db: Session = None):
         ap_data = fetch_ap_data(auth_manager, rounded_unix_timestamp)
         site_data = fetch_client_counts(auth_manager, rounded_unix_timestamp)
         
-        # Process site-level data
+        # Process site-level data for wireless_count DB
         for site in site_data:
             building_name = site.get("parentSiteName")
             floor_name = site.get("siteName")
@@ -287,7 +320,16 @@ def update_client_count_task(db: Session = None):
                 db.add(client_count)
         
         db.commit()
-        logger.info("Client count data updated successfully")
+        logger.info("Client count data updated successfully in wireless_count DB")
+
+        # Update apclientcount DB with AP-level data
+        if os.getenv("TESTING", "false").lower() != "true":
+            try:
+                insert_apclientcount_data(ap_data, now)
+                logger.info("Client count data updated successfully in apclientcount DB")
+            except Exception as e:
+                logger.error(f"Error updating apclientcount DB: {e}")
+
     except Exception as e:
         db.rollback()
         logger.error(f"Error updating client count data: {e}")
@@ -387,7 +429,7 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
             session.close()
 
 @app.get("/aps", response_model=List[dict], tags=["Access Points"])
-def get_aps(db: Session = Depends(get_db)):
+def get_aps(db: Session = Depends(get_wireless_db)):
     """Get all access points from the database."""
     try:
         logger.info("Fetching AP data from the database")
@@ -416,7 +458,7 @@ def get_aps(db: Session = Depends(get_db)):
 def get_client_counts(
     building: Optional[str] = None,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_apclient_db)
 ):
     """Get client count data from the database."""
     try:
@@ -445,7 +487,7 @@ def get_client_counts(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/buildings", response_model=List[dict], tags=["Buildings"])
-def get_buildings(db: Session = Depends(get_db)):
+def get_buildings(db: Session = Depends(get_wireless_db)):
     """Get list of buildings with their details."""
     try:
         logger.info("Fetching list of buildings")
@@ -464,7 +506,7 @@ def get_buildings(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/floors/{building_id}", response_model=List[dict], tags=["Floors"])
-def get_floors(building_id: int, db: Session = Depends(get_db)):
+def get_floors(building_id: int, db: Session = Depends(get_wireless_db)):
     """Get floors for a specific building."""
     try:
         floors = db.query(Floor).filter_by(buildingid=building_id).all()
@@ -482,7 +524,7 @@ def get_floors(building_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/rooms/{floor_id}", response_model=List[dict], tags=["Rooms"])
-def get_rooms(floor_id: int, db: Session = Depends(get_db)):
+def get_rooms(floor_id: int, db: Session = Depends(get_wireless_db)):
     """Get rooms for a specific floor."""
     try:
         rooms = db.query(Room).filter_by(floorid=floor_id).all()
@@ -499,7 +541,7 @@ def get_rooms(floor_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/radio-types", response_model=List[dict], tags=["Radio Types"])
-def get_radio_types(db: Session = Depends(get_db)):
+def get_radio_types(db: Session = Depends(get_wireless_db)):
     """Get all radio types."""
     try:
         radio_types = db.query(RadioType).all()
@@ -513,3 +555,197 @@ def get_radio_types(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Unexpected error in /radio-types: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/wireless/campuses/", response_model=CampusResponse)
+def create_campus(campus: CampusCreate, db: Session = Depends(get_wireless_db)):
+    """Create a new campus."""
+    db_campus = Campus(campus_name=campus.campus_name)
+    db.add(db_campus)
+    db.commit()
+    db.refresh(db_campus)
+    return db_campus
+
+@app.get("/wireless/campuses/", response_model=List[CampusResponse])
+def get_campuses(db: Session = Depends(get_wireless_db)):
+    """Get all campuses."""
+    return db.query(Campus).all()
+
+@app.post("/wireless/buildings/", response_model=BuildingResponse)
+def create_building(building: BuildingCreate, db: Session = Depends(get_wireless_db)):
+    """Create a new building."""
+    db_building = Building(**building.dict())
+    db.add(db_building)
+    db.commit()
+    db.refresh(db_building)
+    return db_building
+
+@app.get("/wireless/buildings/", response_model=List[BuildingResponse])
+def get_wireless_buildings(campus_id: Optional[int] = None, db: Session = Depends(get_wireless_db)):
+    """Get all buildings, optionally filtered by campus."""
+    query = db.query(Building)
+    if campus_id:
+        query = query.filter(Building.campus_id == campus_id)
+    return query.all()
+
+@app.post("/wireless/client-counts/", response_model=ClientCountResponse)
+def create_client_count(count: ClientCountCreate, db: Session = Depends(get_wireless_db)):
+    """Create a new client count."""
+    db_count = ClientCount(**count.dict())
+    db.add(db_count)
+    db.commit()
+    db.refresh(db_count)
+    return db_count
+
+@app.get("/wireless/client-counts/", response_model=List[ClientCountResponse])
+def get_wireless_client_counts(
+    building_id: Optional[int] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    db: Session = Depends(get_wireless_db)
+):
+    """Get client counts with optional filters."""
+    query = db.query(ClientCount)
+    if building_id:
+        query = query.filter(ClientCount.building_id == building_id)
+    if start_time:
+        query = query.filter(ClientCount.time_inserted >= start_time)
+    if end_time:
+        query = query.filter(ClientCount.time_inserted <= end_time)
+    return query.all()
+
+@app.post("/ap/buildings/", response_model=ApBuildingResponse)
+def create_ap_building(building: ApBuildingCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new AP building."""
+    db_building = ApBuilding(**building.dict())
+    db.add(db_building)
+    db.commit()
+    db.refresh(db_building)
+    return db_building
+
+@app.get("/ap/buildings/", response_model=List[ApBuildingResponse])
+def get_ap_buildings(db: Session = Depends(get_apclient_db)):
+    """Get all AP buildings."""
+    return db.query(ApBuilding).all()
+
+@app.post("/ap/floors/", response_model=FloorResponse)
+def create_floor(floor: FloorCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new floor."""
+    db_floor = Floor(**floor.dict())
+    db.add(db_floor)
+    db.commit()
+    db.refresh(db_floor)
+    return db_floor
+
+@app.get("/ap/floors/", response_model=List[FloorResponse])
+def get_ap_floors(building_id: Optional[int] = None, db: Session = Depends(get_apclient_db)):
+    """Get all floors, optionally filtered by building."""
+    query = db.query(Floor)
+    if building_id:
+        query = query.filter(Floor.buildingid == building_id)
+    return query.all()
+
+@app.post("/ap/rooms/", response_model=RoomResponse)
+def create_room(room: RoomCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new room."""
+    db_room = Room(**room.dict())
+    db.add(db_room)
+    db.commit()
+    db.refresh(db_room)
+    return db_room
+
+@app.get("/ap/rooms/", response_model=List[RoomResponse])
+def get_ap_rooms(floor_id: Optional[int] = None, db: Session = Depends(get_apclient_db)):
+    """Get all rooms, optionally filtered by floor."""
+    query = db.query(Room)
+    if floor_id:
+        query = query.filter(Room.floorid == floor_id)
+    return query.all()
+
+@app.post("/ap/access-points/", response_model=AccessPointResponse)
+def create_access_point(ap: AccessPointCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new access point."""
+    db_ap = AccessPoint(**ap.dict())
+    db.add(db_ap)
+    db.commit()
+    db.refresh(db_ap)
+    return db_ap
+
+@app.get("/ap/access-points/", response_model=List[AccessPointResponse])
+def get_ap_access_points(
+    building_id: Optional[int] = None,
+    floor_id: Optional[int] = None,
+    room_id: Optional[int] = None,
+    db: Session = Depends(get_apclient_db)
+):
+    """Get all access points with optional filters."""
+    query = db.query(AccessPoint)
+    if building_id:
+        query = query.filter(AccessPoint.buildingid == building_id)
+    if floor_id:
+        query = query.filter(AccessPoint.floorid == floor_id)
+    if room_id:
+        query = query.filter(AccessPoint.roomid == room_id)
+    return query.all()
+
+@app.post("/ap/radio-types/", response_model=RadioTypeResponse)
+def create_radio_type(radio: RadioTypeCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new radio type."""
+    db_radio = RadioType(**radio.dict())
+    db.add(db_radio)
+    db.commit()
+    db.refresh(db_radio)
+    return db_radio
+
+@app.get("/ap/radio-types/", response_model=List[RadioTypeResponse])
+def get_ap_radio_types(db: Session = Depends(get_apclient_db)):
+    """Get all radio types."""
+    return db.query(RadioType).all()
+
+@app.post("/ap/client-counts/", response_model=ClientCountAPResponse)
+def create_client_count_ap(count: ClientCountAPCreate, db: Session = Depends(get_apclient_db)):
+    """Create a new AP client count."""
+    db_count = ClientCountAP(**count.dict())
+    db.add(db_count)
+    db.commit()
+    db.refresh(db_count)
+    return db_count
+
+@app.get("/ap/client-counts/", response_model=List[ClientCountAPResponse])
+def get_ap_client_counts(
+    ap_id: Optional[int] = None,
+    radio_id: Optional[int] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    db: Session = Depends(get_apclient_db)
+):
+    """Get AP client counts with optional filters."""
+    query = db.query(ClientCountAP)
+    if ap_id:
+        query = query.filter(ClientCountAP.apid == ap_id)
+    if radio_id:
+        query = query.filter(ClientCountAP.radioid == radio_id)
+    if start_time:
+        query = query.filter(ClientCountAP.timestamp >= start_time)
+    if end_time:
+        query = query.filter(ClientCountAP.timestamp <= end_time)
+    return query.all()
+
+@app.post("/tasks/update-client-count/", response_model=dict)
+def trigger_update_client_count():
+    """Trigger the client count update task."""
+    try:
+        update_client_count_task()
+        return {"message": "Client count update task started"}
+    except Exception as e:
+        logger.error(f"Error triggering client count update task: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/update-ap-data/", response_model=dict)
+def trigger_update_ap_data():
+    """Trigger the AP data update task."""
+    try:
+        update_ap_data_task()
+        return {"message": "AP data update task started"}
+    except Exception as e:
+        logger.error(f"Error triggering AP data update task: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -199,8 +199,8 @@ def fetch_ap_data(auth_manager, timestamp=None):
     while True:
         # Build request parameters without timestamps
         params = {
-            "deviceRole": "AP",
-            "siteId": KEELE_CAMPUS_SITE_ID,
+            "deviceRole": "AP", 
+            "siteId": KEELE_CAMPUS_SITE_ID, 
             "limit": limit,
             "offset": offset
         }

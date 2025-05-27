@@ -1,13 +1,13 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from ap_monitor.app.db import get_db, init_db
+from ap_monitor.app.db import get_wireless_db, get_apclient_db, init_db
 from sqlalchemy.exc import OperationalError
 
-def test_get_db_yields_and_closes():
+def test_get_wireless_db_yields_and_closes():
     mock_session = MagicMock()
     
-    with patch("ap_monitor.app.db.SessionLocal", return_value=mock_session):
-        gen = get_db()
+    with patch("ap_monitor.app.db.WirelessSessionLocal", return_value=mock_session):
+        gen = get_wireless_db()
         db = next(gen)
         assert db == mock_session
         try:
@@ -17,10 +17,24 @@ def test_get_db_yields_and_closes():
         
         mock_session.close.assert_called_once()
 
-@patch("ap_monitor.app.db.Base.metadata.create_all")
+def test_get_apclient_db_yields_and_closes():
+    mock_session = MagicMock()
+    
+    with patch("ap_monitor.app.db.APClientSessionLocal", return_value=mock_session):
+        gen = get_apclient_db()
+        db = next(gen)
+        assert db == mock_session
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+        
+        mock_session.close.assert_called_once()
+
+@patch("ap_monitor.app.db.WirelessBase.metadata.create_all")
+@patch("ap_monitor.app.db.APClientBase.metadata.create_all")
 @patch("ap_monitor.app.db.logger")
-@patch("ap_monitor.app.db.engine")
-def test_init_db_success(mock_engine, mock_logger, mock_create_all):
+def test_init_db_success(mock_logger, mock_apclient_create_all, mock_wireless_create_all):
     fake_models = MagicMock()
     fake_models.AccessPoint = MagicMock()
     fake_models.ClientCount = MagicMock()
@@ -28,11 +42,13 @@ def test_init_db_success(mock_engine, mock_logger, mock_create_all):
     with patch.dict("sys.modules", {"ap_monitor.app.models": fake_models}):
         init_db()
 
-    mock_create_all.assert_called_once_with(bind=mock_engine)
+    mock_wireless_create_all.assert_called_once()
+    mock_apclient_create_all.assert_called_once()
     mock_logger.info.assert_any_call("Creating database tables...")
-    mock_logger.info.assert_any_call("Database tables created successfully")
+    mock_logger.info.assert_any_call("Wireless count database tables created successfully")
+    mock_logger.info.assert_any_call("AP client count database tables created successfully")
 
-@patch("ap_monitor.app.db.Base.metadata.create_all", side_effect=OperationalError("DB error", None, None))
+@patch("ap_monitor.app.db.WirelessBase.metadata.create_all", side_effect=OperationalError("DB error", None, None))
 def test_init_db_failure(mock_create_all):
     with patch("ap_monitor.app.db.logger") as mock_logger:
         try:

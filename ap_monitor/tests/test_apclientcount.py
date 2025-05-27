@@ -1,19 +1,38 @@
 import pytest
-from datetime import datetime
-from sqlalchemy import create_engine
+from datetime import datetime, timezone
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
-from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType, Base
+from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType, APClientBase
+from ap_monitor.app.db import APClientBase as DBAPClientBase
 from ap_monitor.app.main import insert_apclientcount_data
 
 # Helper for radio mapping
 radioId_map = {'radio0': 1, 'radio1': 2, 'radio2': 3}
 
-def test_insert_apclientcount_data():
-    # Create an in-memory SQLite DB for testing, using the same Base as the app
+@pytest.fixture
+def session():
+    # Create test database
     engine = create_engine("sqlite:///:memory:")
+    
+    # Enable foreign key support for SQLite
+    def _fk_pragma_on_connect(dbapi_con, con_record):
+        dbapi_con.execute('pragma foreign_keys=ON')
+    
+    event.listen(engine, 'connect', _fk_pragma_on_connect)
+    
+    # Create all tables
+    DBAPClientBase.metadata.create_all(bind=engine)
+    
+    # Create session
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()
+    
+    try:
+        yield session
+    finally:
+        session.close()
+
+def test_insert_apclientcount_data(session):
     # Clean up tables before test
     session.query(ClientCountAP).delete()
     session.query(AccessPoint).delete()
@@ -58,14 +77,9 @@ def test_insert_apclientcount_data():
     radio_counts = {cc.radioid: cc.clientcount for cc in client_counts}
     assert radio_counts[1] == 5  # radio0
     assert radio_counts[2] == 3  # radio1
-    session.close()
 
-def test_insert_apclientcount_data_invalid_location():
+def test_insert_apclientcount_data_invalid_location(session):
     # Should skip device with invalid location
-    engine = create_engine("sqlite:///:memory:")
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-    session = TestingSessionLocal()
     device_info_list = [
         {
             "name": "BadAP",
@@ -83,14 +97,9 @@ def test_insert_apclientcount_data_invalid_location():
     # Should not insert anything
     assert session.query(ApBuilding).count() == 0
     assert session.query(AccessPoint).count() == 0
-    session.close()
 
-def test_insert_apclientcount_data_existing_ap_update():
+def test_insert_apclientcount_data_existing_ap_update(session):
     # Should update existing AP, not duplicate
-    engine = create_engine("sqlite:///:memory:")
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-    session = TestingSessionLocal()
     for rname, rid in radioId_map.items():
         session.add(RadioType(radioid=rid, radioname=rname))
     session.commit()
@@ -120,14 +129,9 @@ def test_insert_apclientcount_data_existing_ap_update():
     assert client_counts[0].clientcount == 7
     assert client_counts[0].radioid == 1  # radio0
     assert ap.isactive is False
-    session.close()
 
-def test_insert_apclientcount_data_unexpected_radio():
+def test_insert_apclientcount_data_unexpected_radio(session):
     # Should skip unexpected radio keys
-    engine = create_engine("sqlite:///:memory:")
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-    session = TestingSessionLocal()
     session.add(RadioType(radioid=1, radioname="radio0"))
     session.commit()
     device_info_list = [
@@ -151,4 +155,353 @@ def test_insert_apclientcount_data_unexpected_radio():
     assert len(client_counts) == 1
     assert client_counts[0].radioid == 1
     assert client_counts[0].clientcount == 2
-    session.close()
+
+def test_create_ap_building(session):
+    # Clean up existing data
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+    
+    # Create test data
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    assert building.buildingid is not None
+    assert building.buildingname == "Test Building"
+
+def test_create_floor(session):
+    # Clean up existing data
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+    
+    # Create test data
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(
+        buildingid=building.buildingid,
+        floorname="1st Floor"
+    )
+    session.add(floor)
+    session.commit()
+    
+    assert floor.floorid is not None
+    assert floor.floorname == "1st Floor"
+    assert floor.buildingid == building.buildingid
+
+def test_create_room(session):
+    # Clean up existing data
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+    
+    # Create test data
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(
+        buildingid=building.buildingid,
+        floorname="1st Floor"
+    )
+    session.add(floor)
+    session.commit()
+    
+    room = Room(
+        floorid=floor.floorid,
+        roomname="Test Room"
+    )
+    session.add(room)
+    session.commit()
+    
+    assert room.roomid is not None
+    assert room.roomname == "Test Room"
+    assert room.floorid == floor.floorid
+
+def test_create_access_point(session):
+    # Clean up existing data
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+    
+    # Create test data
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(
+        buildingid=building.buildingid,
+        floorname="1st Floor"
+    )
+    session.add(floor)
+    session.commit()
+    
+    room = Room(
+        floorid=floor.floorid,
+        roomname="Test Room"
+    )
+    session.add(room)
+    session.commit()
+    
+    ap = AccessPoint(
+        buildingid=building.buildingid,
+        floorid=floor.floorid,
+        roomid=room.roomid,
+        apname="Test AP",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="Test Model"
+    )
+    session.add(ap)
+    session.commit()
+    
+    assert ap.apid is not None
+    assert ap.apname == "Test AP"
+    assert ap.macaddress == "00:11:22:33:44:55"
+    assert ap.ipaddress == "192.168.1.1"
+    assert ap.modelname == "Test Model"
+    assert ap.buildingid == building.buildingid
+    assert ap.floorid == floor.floorid
+    assert ap.roomid == room.roomid
+
+def test_create_client_count(session):
+    # Clean up existing data
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+    
+    # Create test data
+    building = ApBuilding(buildingname="Test Building")
+    session.add(building)
+    session.commit()
+    
+    floor = Floor(
+        buildingid=building.buildingid,
+        floorname="1st Floor"
+    )
+    session.add(floor)
+    session.commit()
+    
+    room = Room(
+        floorid=floor.floorid,
+        roomname="Test Room"
+    )
+    session.add(room)
+    session.commit()
+    
+    radio = RadioType(radioname="2.4GHz")
+    session.add(radio)
+    session.commit()
+    
+    ap = AccessPoint(
+        buildingid=building.buildingid,
+        floorid=floor.floorid,
+        roomid=room.roomid,
+        apname="Test AP",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="Test Model"
+    )
+    session.add(ap)
+    session.commit()
+    
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=5,
+        timestamp=datetime.now(timezone.utc)
+    )
+    session.add(client_count)
+    session.commit()
+    
+    assert client_count.countid is not None
+    assert client_count.clientcount == 5
+    assert client_count.apid == ap.apid
+    assert client_count.radioid == radio.radioid
+
+def test_get_client_count(session):
+    # Clean up any existing data in the correct order
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+
+    # Create required records
+    building = ApBuilding(buildingname="TestBuilding")
+    session.add(building)
+    session.flush()
+
+    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    session.add(floor)
+    session.flush()
+
+    radio = RadioType(radioid=1, radioname="radio0")
+    session.add(radio)
+    session.commit()
+
+    # Create an access point
+    ap = AccessPoint(
+        apname="TestAP",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="ModelX",
+        isactive=True,
+        floorid=floor.floorid,
+        buildingid=building.buildingid
+    )
+    session.add(ap)
+    session.commit()
+
+    # Create a client count
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=10,
+        timestamp=datetime.now()
+    )
+    session.add(client_count)
+    session.commit()
+
+    # Get the client count
+    result = session.query(ClientCountAP).first()
+    assert result is not None
+    assert result.clientcount == 10
+    assert result.apid == ap.apid
+    assert result.radioid == radio.radioid
+
+def test_update_client_count(session):
+    # Clean up any existing data in the correct order
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+
+    # Create required records
+    building = ApBuilding(buildingname="TestBuilding")
+    session.add(building)
+    session.flush()
+
+    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    session.add(floor)
+    session.flush()
+
+    radio = RadioType(radioid=1, radioname="radio0")
+    session.add(radio)
+    session.commit()
+
+    # Create an access point
+    ap = AccessPoint(
+        apname="TestAP",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="ModelX",
+        isactive=True,
+        floorid=floor.floorid,
+        buildingid=building.buildingid
+    )
+    session.add(ap)
+    session.commit()
+
+    # Create a client count
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=10,
+        timestamp=datetime.now()
+    )
+    session.add(client_count)
+    session.commit()
+
+    # Update the client count
+    client_count.clientcount = 20
+    session.commit()
+
+    # Verify the update
+    result = session.query(ClientCountAP).first()
+    assert result is not None
+    assert result.clientcount == 20
+    assert result.apid == ap.apid
+    assert result.radioid == radio.radioid
+
+def test_delete_client_count(session):
+    # Clean up any existing data in the correct order
+    session.query(ClientCountAP).delete()
+    session.query(AccessPoint).delete()
+    session.query(Room).delete()
+    session.query(Floor).delete()
+    session.query(ApBuilding).delete()
+    session.query(RadioType).delete()
+    session.commit()
+
+    # Create required records
+    building = ApBuilding(buildingname="TestBuilding")
+    session.add(building)
+    session.flush()
+
+    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    session.add(floor)
+    session.flush()
+
+    radio = RadioType(radioid=1, radioname="radio0")
+    session.add(radio)
+    session.commit()
+
+    # Create an access point
+    ap = AccessPoint(
+        apname="TestAP",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
+        modelname="ModelX",
+        isactive=True,
+        floorid=floor.floorid,
+        buildingid=building.buildingid
+    )
+    session.add(ap)
+    session.commit()
+
+    # Create a client count
+    client_count = ClientCountAP(
+        apid=ap.apid,
+        radioid=radio.radioid,
+        clientcount=10,
+        timestamp=datetime.now()
+    )
+    session.add(client_count)
+    session.commit()
+
+    # Delete the client count
+    session.delete(client_count)
+    session.commit()
+
+    # Verify the deletion
+    result = session.query(ClientCountAP).first()
+    assert result is None

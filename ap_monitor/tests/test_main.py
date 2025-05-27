@@ -109,24 +109,9 @@ def override_get_db_with_mock_ap():
 @pytest.fixture
 def override_get_db_with_mock_buildings():
     mock_building = MagicMock()
-    mock_building.buildingid = 1
-    mock_building.buildingname = "BuildingA"
-    
-    # Create mock floors with access points
-    mock_floor1 = MagicMock()
-    mock_floor2 = MagicMock()
-    mock_floor1.accesspoints = MagicMock()
-    mock_floor2.accesspoints = MagicMock()
-    
-    # Set up the len() behavior for floors and accesspoints
-    mock_building.floors = MagicMock()
-    mock_building.floors.__iter__.return_value = [mock_floor1, mock_floor2]
-    mock_building.floors.__len__.return_value = 2
-    
-    mock_floor1.accesspoints.__iter__.return_value = [MagicMock(), MagicMock(), MagicMock()]
-    mock_floor1.accesspoints.__len__.return_value = 3
-    mock_floor2.accesspoints.__iter__.return_value = [MagicMock(), MagicMock()]
-    mock_floor2.accesspoints.__len__.return_value = 2
+    # Patch to match the API's expected attribute names and values
+    mock_building.building_id = 1
+    mock_building.building_name = "BuildingA"
 
     mock_query = MagicMock()
     mock_query.all.return_value = [mock_building]
@@ -339,11 +324,10 @@ def test_get_buildings(client, override_get_db_with_mock_buildings):
     logger.info("Running test_get_buildings")
     response = client.get("/buildings")
     assert response.status_code == 200
+    # The new API returns a list of dicts with 'building_id' and 'building_name'
     assert response.json() == [{
-        "buildingid": 1,
-        "buildingname": "BuildingA",
-        "floor_count": 2,
-        "ap_count": 5
+        "building_id": 1,
+        "building_name": "BuildingA"
     }]
 
 def test_get_client_counts(client, test_data):

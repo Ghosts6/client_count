@@ -45,14 +45,14 @@ class ClientCount(WirelessBase):
 # apclientcount DB models
 class ApBuilding(APClientBase):
     __tablename__ = "buildings"
-    building_id = Column(Integer, primary_key=True, autoincrement=True)
-    building_name = Column(String(255), nullable=False, unique=True)
+    buildingid = Column(Integer, primary_key=True, autoincrement=True)
+    buildingname = Column(String(255), nullable=False, unique=True)
     floors = relationship("Floor", back_populates="building", cascade="all, delete-orphan")
 
 class Floor(APClientBase):
     __tablename__ = "floors"
     floorid = Column(Integer, primary_key=True, autoincrement=True)
-    building_id = Column(Integer, ForeignKey("buildings.building_id"))
+    buildingid = Column(Integer, ForeignKey("buildings.buildingid"))
     floorname = Column(String(50), nullable=False)
     building = relationship("ApBuilding", back_populates="floors")
     rooms = relationship("Room", back_populates="floor", cascade="all, delete-orphan")
@@ -73,7 +73,7 @@ class Room(APClientBase):
 class AccessPoint(APClientBase):
     __tablename__ = "accesspoints"
     apid = Column(Integer, primary_key=True, autoincrement=True)
-    building_id = Column(Integer, ForeignKey("buildings.building_id"))
+    buildingid = Column(Integer, ForeignKey("buildings.buildingid"))
     floorid = Column(Integer, ForeignKey("floors.floorid"))
     roomid = Column(Integer, ForeignKey("rooms.roomid"))
     apname = Column(String(40), nullable=False)

@@ -587,3 +587,87 @@ def test_insert_apclientcount_data_partial_location(session):
     assert client_count is not None, "Client count should be created"
     assert client_count.clientcount == 2
     assert client_count.radioid == 1  # radio0
+
+def test_insert_apclientcount_data_real_log_examples(session):
+    """Test real-world location formats from production logs."""
+    # Insert radios
+    for rname, rid in radioId_map.items():
+        session.add(RadioType(radioname=rname, radioid=rid))
+    session.commit()
+
+    # Example 1: Global/Keele Campus/Student Centre/Floor 1
+    device_info_list = [
+        {
+            "name": "AP-StudentCentre-1",
+            "location": "Global/Keele Campus/Student Centre/Floor 1",
+            "macAddress": "00:11:22:33:44:10",
+            "ipAddress": "192.168.0.10",
+            "model": "ModelA",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 1}
+        }
+    ]
+    timestamp = datetime.now()
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+    building = session.query(ApBuilding).filter_by(buildingname="Student Centre").first()
+    assert building is not None, "Building should be created with name 'Student Centre'"
+    floor = session.query(Floor).filter_by(floorname="Floor 1", buildingid=building.buildingid).first()
+    assert floor is not None, "Floor should be created for the building"
+
+    # Example 2: Global/Keele Campus/Osgoode/Basement
+    device_info_list = [
+        {
+            "name": "AP-Osgoode-B",
+            "location": "Global/Keele Campus/Osgoode/Basement",
+            "macAddress": "00:11:22:33:44:11",
+            "ipAddress": "192.168.0.11",
+            "model": "ModelB",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 2}
+        }
+    ]
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+    building = session.query(ApBuilding).filter_by(buildingname="Osgoode").first()
+    assert building is not None, "Building should be created with name 'Osgoode'"
+    floor = session.query(Floor).filter_by(floorname="Basement", buildingid=building.buildingid).first()
+    assert floor is not None, "Floor should be created for the building"
+
+    # Example 3: Global/Keele Campus/Behavioural Sciences/Floor 2
+    device_info_list = [
+        {
+            "name": "AP-Behavioural-2",
+            "location": "Global/Keele Campus/Behavioural Sciences/Floor 2",
+            "macAddress": "00:11:22:33:44:12",
+            "ipAddress": "192.168.0.12",
+            "model": "ModelC",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 3}
+        }
+    ]
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+    building = session.query(ApBuilding).filter_by(buildingname="Behavioural Sciences").first()
+    assert building is not None, "Building should be created with name 'Behavioural Sciences'"
+    floor = session.query(Floor).filter_by(floorname="Floor 2", buildingid=building.buildingid).first()
+    assert floor is not None, "Floor should be created for the building"
+
+    # Example 4: Global/Keele Campus/Osgoode/Floor 4
+    device_info_list = [
+        {
+            "name": "AP-Osgoode-4",
+            "location": "Global/Keele Campus/Osgoode/Floor 4",
+            "macAddress": "00:11:22:33:44:13",
+            "ipAddress": "192.168.0.13",
+            "model": "ModelD",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 4}
+        }
+    ]
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+    building = session.query(ApBuilding).filter_by(buildingname="Osgoode").first()
+    assert building is not None, "Building should be created with name 'Osgoode'"
+    floor = session.query(Floor).filter_by(floorname="Floor 4", buildingid=building.buildingid).first()
+    assert floor is not None, "Floor should be created for the building"

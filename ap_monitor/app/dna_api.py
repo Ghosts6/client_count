@@ -368,23 +368,21 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
             
             # Location parsing logic - handle multiple formats
             location_parts = [p.strip() for p in location.split('/') if p.strip()] if location else []
-            
-            # Determine building, floor, and room based on different location formats
+            building_name = None
+            floor_name = None
+            room_name = None
+            # Robust parsing for all real-world formats
             if len(location_parts) >= 4:
-                # Format: Global/Campus/Building/Floor[/Room]
                 building_name = location_parts[2]
                 floor_name = location_parts[3]
-                room_name = location_parts[4] if len(location_parts) > 4 else None
+                if len(location_parts) > 4:
+                    room_name = location_parts[4]
             elif len(location_parts) == 3:
-                # Format: Campus/Building/Floor
                 building_name = location_parts[1]
                 floor_name = location_parts[2]
-                room_name = None
             elif len(location_parts) == 2:
-                # Format: Building/Floor
                 building_name = location_parts[0]
                 floor_name = location_parts[1]
-                room_name = None
             else:
                 logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
                 continue

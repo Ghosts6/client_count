@@ -1,3 +1,4 @@
+print('DEBUG: ap_monitor.app.db module loaded')
 import logging
 import os
 from sqlalchemy import create_engine
@@ -26,6 +27,16 @@ if os.getenv("TESTING", "false").lower() == "true":
     WIRELESS_DB_URL = "sqlite:///:memory:"
     APCLIENT_DB_URL = "sqlite:///:memory:"
 
+# Create base classes for declarative models
+WirelessBase = declarative_base()
+APClientBase = declarative_base()
+
+# Initialize engines and session factories
+wireless_engine = None
+apclient_engine = None
+WirelessSessionLocal = None
+APClientSessionLocal = None
+
 try:
     # Create SQLAlchemy engines with appropriate configuration for each database type
     if os.getenv("TESTING", "false").lower() == "true":
@@ -34,7 +45,6 @@ try:
             WIRELESS_DB_URL,
             connect_args={"check_same_thread": False}
         )
-        
         apclient_engine = create_engine(
             APCLIENT_DB_URL,
             connect_args={"check_same_thread": False}
@@ -48,7 +58,6 @@ try:
             max_overflow=10,
             pool_recycle=3600
         )
-        
         apclient_engine = create_engine(
             APCLIENT_DB_URL,
             pool_pre_ping=True,
@@ -60,10 +69,6 @@ try:
     # Create session factories
     WirelessSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=wireless_engine)
     APClientSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine)
-    
-    # Create base classes for declarative models
-    WirelessBase = declarative_base()
-    APClientBase = declarative_base()
     
     logger.info(f"Database connections set up successfully")
 except Exception as e:
@@ -106,3 +111,16 @@ def init_db():
     except Exception as e:
         logger.error(f"Error initializing databases: {e}")
         raise
+
+# Make these available at module level for testing
+__all__ = [
+    'wireless_engine',
+    'apclient_engine',
+    'WirelessSessionLocal',
+    'APClientSessionLocal',
+    'WirelessBase',
+    'APClientBase',
+    'get_wireless_db',
+    'get_apclient_db',
+    'init_db'
+]

@@ -45,6 +45,31 @@ def get_database_url():
 # Dynamically determine DATABASE_URL
 DATABASE_URL = get_database_url()
 
+# Set up logging first
+logger = setup_logging()
+
+# Log the database URL being used
+logger.info(f"Using DATABASE_URL: {DATABASE_URL}")
+
+def initialize_database():
+    global engine, TestingSessionLocal
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+    # Initialize both databases only in non-test mode
+    if os.getenv("TESTING", "false").lower() != "true":
+        # Create wireless_count tables
+        WirelessBase.metadata.create_all(bind=engine)
+        logger.info("Wireless count database tables created successfully")
+        
+        # Create apclientcount tables
+        APClientBase.metadata.create_all(bind=apclient_engine)
+        logger.info("AP client count database tables created successfully")
+    # Ensure apclientcount tables exist in test mode
+    elif os.getenv("TESTING", "false").lower() == "true":
+        APClientBase.metadata.create_all(bind=apclient_engine)
+        logger.info("Test AP client count database tables created successfully")
+
 # Initialize database engine and session factory
 engine = None
 TestingSessionLocal = None
@@ -56,27 +81,14 @@ if os.getenv("TESTING", "false").lower() != "true":
     ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
 else:
     # In test mode, use the same in-memory database for both
-    apclient_engine = None
-    ApclientSessionLocal = None
-
-def initialize_database():
-    global engine, TestingSessionLocal
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    
-    # Initialize both databases only in non-test mode
-    if os.getenv("TESTING", "false").lower() != "true":
-        WirelessBase.metadata.create_all(bind=engine)
-        APClientBase.metadata.create_all(bind=apclient_engine)
+    from sqlalchemy import create_engine
+    apclient_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
+    # Ensure apclientcount tables exist immediately
+    APClientBase.metadata.create_all(bind=apclient_engine)
 
 # Reinitialize the database engine and session factory
 initialize_database()
-
-# Set up logging
-logger = setup_logging()
-
-# Log the database URL being used
-logger.info(f"Using DATABASE_URL: {DATABASE_URL}")
 
 # Initialize scheduler
 scheduler = BackgroundScheduler()
@@ -149,56 +161,59 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-def update_ap_data_task(db: Session = None):
+def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None):
     """Background task to update AP data in the database."""
+    auth_manager_obj = auth_manager_obj or auth_manager
+    fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
     if db is None:
-        db = next(get_wireless_db())
+        db = next(get_apclient_db())  # Use apclient_db instead of wireless_db
         close_db = True
     try:
         logger.info("Running scheduled task: update_ap_data_task")
         logger.debug(f"Database session being used: {db}")
         now = datetime.now(timezone.utc)
         rounded_unix_timestamp = int(now.timestamp() * 1000)
-        aps = fetch_ap_data(auth_manager, rounded_unix_timestamp)
+        aps = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
         logger.info(f"Fetched {len(aps)} APs from DNAC API")
-        
-        # Update wireless_count DB
+
+        # Process AP data
         for ap in aps:
-            # Try to get location from multiple fields
-            location = ap.get('location')
-            if not location or len(location.split('/')) < 5:
-                # Fallback to snmpLocation if available and not default
-                snmp_location = ap.get('snmpLocation')
-                if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
-                    location = snmp_location
-                else:
-                    # Fallback to locationName if available and not null
-                    location_name = ap.get('locationName')
-                    if location_name and location_name.strip().lower() != 'null':
-                        location = location_name
+            ap_name = ap.get('name')
+            location = ap.get('location', '')
             location_parts = location.split('/') if location else []
-            if len(location_parts) < 2:
-                logger.warning(f"Skipping device {ap.get('name')} due to missing or invalid location fields. location: {location}")
-                continue
-            # Use last two parts as building and floor if possible
-            building_name = location_parts[-2] if len(location_parts) >= 2 else 'Unknown'
-            floor_name = location_parts[-1] if len(location_parts) >= 1 else 'Unknown'
-            logger.debug(f"Processing AP: {ap.get('name')} in Building: {building_name}, Floor: {floor_name}")
             
-            # Find or create building (wireless_count DB)
-            building = db.query(Building).filter_by(building_name=building_name).first()
+            # Handle location parsing based on real data format
+            if not location_parts:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+                
+            # Extract building and floor from location
+            if len(location_parts) >= 5:
+                building_name = location_parts[3]  # e.g., "Keele Campus"
+                floor_name = location_parts[4]     # e.g., "Floor 5"
+            elif len(location_parts) == 2:
+                building_name = location_parts[0]
+                floor_name = location_parts[1]
+            else:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+
+            # Building
+            building = db.query(ApBuilding).filter_by(building_name=building_name).first()
             if not building:
-                logger.debug(f"Creating new building: {building_name}")
-                building = Building(building_name=building_name, campus_id=1, latitude=0, longitude=0)  # TODO: set campus_id, lat/lon properly
+                building = ApBuilding(building_name=building_name)
                 db.add(building)
                 db.flush()
-            
-            # Find or create floor (wireless_count DB)
-            # If you have a Floor model for wireless_count, use it. Otherwise, skip or adjust as needed.
-            # ...existing code for floor if needed...
-            
-            # Find or create access point
+
+            # Floor
+            floor = db.query(Floor).filter_by(floorname=floor_name, building_id=building.building_id).first()
+            if not floor:
+                floor = Floor(floorname=floor_name, building_id=building.building_id)
+                db.add(floor)
+                db.flush()
+
+            # Access Point
             mac_address = ap.get('macAddress')
             ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
             is_active = ap.get('reachabilityHealth') == "UP"
@@ -212,7 +227,7 @@ def update_ap_data_task(db: Session = None):
                     modelname=ap.get('model'),
                     isactive=is_active,
                     floorid=floor.floorid,
-                    buildingid=building.buildingid
+                    building_id=building.building_id
                 )
                 db.add(ap_record)
                 db.flush()
@@ -220,33 +235,36 @@ def update_ap_data_task(db: Session = None):
                 logger.debug(f"Updating existing AccessPoint: {ap.get('name')}")
                 ap_record.isactive = is_active
                 ap_record.floorid = floor.floorid
-                ap_record.buildingid = building.buildingid
+                ap_record.building_id = building.building_id
 
-            # Create client count records for each radio in wireless_count DB
-            for radio_name, count in ap.get('clientCount', {}).items():
+            # Create client count records for each radio
+            client_counts = ap.get('clientCount', {})
+            for radio_name, count in client_counts.items():
                 radio = db.query(RadioType).filter_by(radioname=radio_name).first()
                 if not radio:
                     logger.warning(f"Unexpected radio key: {radio_name}")
                     continue
-                
-                client_count = ClientCountAP(
+
+                # Check for existing record
+                cc = db.query(ClientCountAP).filter_by(
                     apid=ap_record.apid,
                     radioid=radio.radioid,
-                    clientcount=count,
                     timestamp=now
-                )
-                db.add(client_count)
+                ).first()
+
+                if cc:
+                    cc.clientcount = count
+                else:
+                    cc = ClientCountAP(
+                        apid=ap_record.apid,
+                        radioid=radio.radioid,
+                        clientcount=count,
+                        timestamp=now
+                    )
+                    db.add(cc)
         
         db.commit()
-        logger.info("AP data updated successfully in wireless_count DB")
-
-        # Update apclientcount DB
-        if os.getenv("TESTING", "false").lower() != "true":
-            try:
-                insert_apclientcount_data(aps, now)
-                logger.info("AP data updated successfully in apclientcount DB")
-            except Exception as e:
-                logger.error(f"Error updating apclientcount DB: {e}")
+        logger.info("AP data updated successfully in apclientcount DB")
 
     except Exception as e:
         db.rollback()
@@ -264,11 +282,14 @@ def update_ap_data_task(db: Session = None):
         )
         logger.info(f"Next AP data update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
-def update_client_count_task(db: Session = None):
+def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None):
     """Background task to update client count data in the database."""
+    auth_manager_obj = auth_manager_obj or auth_manager
+    fetch_client_counts_func = fetch_client_counts_func or fetch_client_counts
+    fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
     if db is None:
-        db = next(get_wireless_db())
+        db = next(get_apclient_db())  # Use apclient_db instead of wireless_db
         close_db = True
     try:
         logger.info("Running scheduled task: update_client_count_task")
@@ -276,34 +297,97 @@ def update_client_count_task(db: Session = None):
         rounded_unix_timestamp = int(now.timestamp() * 1000)
         
         # Fetch data from DNA Center API
-        ap_data = fetch_ap_data(auth_manager, rounded_unix_timestamp)
-        site_data = fetch_client_counts(auth_manager, rounded_unix_timestamp)
+        ap_data = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
+        site_data = fetch_client_counts_func(auth_manager_obj, rounded_unix_timestamp)
         
-        # Process site-level data for wireless_count DB
-        for site in site_data:
-            building_name = site.get("parentSiteName")
-            floor_name = site.get("siteName")
-            client_counts = site.get("clientCount", {})
+        # Process AP data for apclientcount DB
+        for ap in ap_data:
+            ap_name = ap.get('name')
+            location = ap.get('location', '')
+            location_parts = location.split('/') if location else []
             
-            # Find or create building (wireless_count DB)
-            building = db.query(Building).filter_by(building_name=building_name).first()
+            # Handle location parsing based on real data format
+            if not location_parts:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+                
+            # Extract building and floor from location
+            if len(location_parts) >= 5:
+                building_name = location_parts[3]  # e.g., "Keele Campus"
+                floor_name = location_parts[4]     # e.g., "Floor 5"
+            elif len(location_parts) == 2:
+                building_name = location_parts[0]
+                floor_name = location_parts[1]
+            else:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+
+            # Building
+            building = db.query(ApBuilding).filter_by(building_name=building_name).first()
             if not building:
-                building = Building(building_name=building_name, campus_id=1, latitude=0, longitude=0)  # TODO: set campus_id, lat/lon properly
+                building = ApBuilding(building_name=building_name)
                 db.add(building)
                 db.flush()
-            
-            # ...existing code for floor if needed...
-            # ...existing code for client counts...
-        db.commit()
-        logger.info("Client count data updated successfully in wireless_count DB")
 
-        # Update apclientcount DB with AP-level data
-        if os.getenv("TESTING", "false").lower() != "true":
-            try:
-                insert_apclientcount_data(ap_data, now)
-                logger.info("Client count data updated successfully in apclientcount DB")
-            except Exception as e:
-                logger.error(f"Error updating apclientcount DB: {e}")
+            # Floor
+            floor = db.query(Floor).filter_by(floorname=floor_name, building_id=building.building_id).first()
+            if not floor:
+                floor = Floor(floorname=floor_name, building_id=building.building_id)
+                db.add(floor)
+                db.flush()
+
+            # Access Point
+            mac_address = ap.get('macAddress')
+            ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
+            is_active = ap.get('reachabilityHealth') == "UP"
+            
+            if not ap_record:
+                logger.debug(f"Creating new AccessPoint: {ap.get('name')} with MAC: {mac_address}")
+                ap_record = AccessPoint(
+                    apname=ap.get('name'),
+                    macaddress=mac_address,
+                    ipaddress=ap.get('ipAddress'),
+                    modelname=ap.get('model'),
+                    isactive=is_active,
+                    floorid=floor.floorid,
+                    building_id=building.building_id
+                )
+                db.add(ap_record)
+                db.flush()
+            else:
+                logger.debug(f"Updating existing AccessPoint: {ap.get('name')}")
+                ap_record.isactive = is_active
+                ap_record.floorid = floor.floorid
+                ap_record.building_id = building.building_id
+
+            # Create client count records for each radio
+            client_counts = ap.get('clientCount', {})
+            for radio_name, count in client_counts.items():
+                radio = db.query(RadioType).filter_by(radioname=radio_name).first()
+                if not radio:
+                    logger.warning(f"Unexpected radio key: {radio_name}")
+                    continue
+
+                # Check for existing record
+                cc = db.query(ClientCountAP).filter_by(
+                    apid=ap_record.apid,
+                    radioid=radio.radioid,
+                    timestamp=now
+                ).first()
+
+                if cc:
+                    cc.clientcount = count
+                else:
+                    cc = ClientCountAP(
+                        apid=ap_record.apid,
+                        radioid=radio.radioid,
+                        clientcount=count,
+                        timestamp=now
+                    )
+                    db.add(cc)
+        
+        db.commit()
+        logger.info("Client count data updated successfully in apclientcount DB")
 
     except Exception as e:
         db.rollback()
@@ -325,35 +409,62 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
     from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType
     close_session = False
     if session is None:
-        session = ApclientSessionLocal()
+        session = APclientSessionLocal()
         close_session = True
     try:
-        radioId_map = {r.radioname: r.radioid for r in session.query(RadioType).all()}
+        # Ensure radio types exist
+        radio_types = {
+            "radio0": 1,
+            "radio1": 2,
+            "radio2": 3
+        }
+        for radio_name, radio_id in radio_types.items():
+            radio = session.query(RadioType).filter_by(radioname=radio_name).first()
+            if not radio:
+                radio = RadioType(radioname=radio_name, radioid=radio_id)
+                session.add(radio)
+        session.flush()
+
         for device in device_info_list:
             ap_name = device['name']
             location = device.get('location', '')
-            location_parts = location.split('/')
-            if len(location_parts) < 5:
+            location_parts = location.split('/') if location else []
+            
+            # Handle location parsing based on real data format
+            if not location_parts:
                 logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
                 continue
-            building_name = location_parts[3]
-            floor_name = location_parts[4]
+                
+            # Extract building and floor from location
+            if len(location_parts) >= 5:
+                building_name = location_parts[2]  # e.g., "Bethune Residence"
+                floor_name = location_parts[3]     # e.g., "Floor 5"
+            elif len(location_parts) == 2:
+                building_name = location_parts[0]
+                floor_name = location_parts[1]
+            else:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+                continue
+
             # Building
-            building = session.query(ApBuilding).filter_by(buildingname=building_name).first()
+            building = session.query(ApBuilding).filter_by(building_name=building_name).first()
             if not building:
-                building = ApBuilding(buildingname=building_name)
+                building = ApBuilding(building_name=building_name)
                 session.add(building)
                 session.flush()
+
             # Floor
-            floor = session.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
+            floor = session.query(Floor).filter_by(floorname=floor_name, building_id=building.building_id).first()
             if not floor:
-                floor = Floor(floorname=floor_name, buildingid=building.buildingid)
+                floor = Floor(floorname=floor_name, building_id=building.building_id)
                 session.add(floor)
                 session.flush()
+
             # Access Point
             mac_address = device['macAddress']
             ap = session.query(AccessPoint).filter_by(macaddress=mac_address).first()
             is_active = device['reachabilityHealth'] == "UP"
+            
             if not ap:
                 ap = AccessPoint(
                     apname=ap_name,
@@ -362,31 +473,33 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
                     modelname=device.get('model'),
                     isactive=is_active,
                     floorid=floor.floorid,
-                    buildingid=building.buildingid
+                    building_id=building.building_id
                 )
                 session.add(ap)
                 session.flush()
             else:
                 ap.isactive = is_active
-            # ClientCountAP
-            for radio, count in device.get('clientCount', {}).items():
-                radio_id = radioId_map.get(radio)
+                ap.floorid = floor.floorid
+                ap.building_id = building.building_id
+
+            # ClientCountAP: Create records for each radio type
+            client_counts = device.get('clientCount', {})
+            for radio_name, count in client_counts.items():
+                radio_id = radio_types.get(radio_name)
                 if radio_id is None:
-                    logger.warning(f"Unexpected radio key: {radio}")
+                    logger.warning(f"Unexpected radio key: {radio_name}")
                     continue
-                
-                # Check for existing client count record
-                existing_cc = session.query(ClientCountAP).filter_by(
+
+                # Check for existing record
+                cc = session.query(ClientCountAP).filter_by(
                     apid=ap.apid,
-                    radioid=radio_id
+                    radioid=radio_id,
+                    timestamp=timestamp
                 ).first()
-                
-                if existing_cc:
-                    # Update existing record
-                    existing_cc.clientcount = count
-                    existing_cc.timestamp = timestamp
+
+                if cc:
+                    cc.clientcount = count
                 else:
-                    # Create new record
                     cc = ClientCountAP(
                         apid=ap.apid,
                         radioid=radio_id,
@@ -394,11 +507,13 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
                         timestamp=timestamp
                     )
                     session.add(cc)
+
         session.commit()
         logger.info(f"Inserted/updated AP and client count data in apclientcount DB for {len(device_info_list)} devices.")
     except Exception as e:
         session.rollback()
         logger.error(f"Error inserting data into apclientcount DB: {e}")
+        raise
     finally:
         if close_session:
             session.close()
@@ -431,28 +546,27 @@ def get_aps(db: Session = Depends(get_wireless_db)):
 
 @app.get("/client-counts", response_model=List[dict], tags=["Client Counts"])
 def get_client_counts(
-    building: Optional[str] = None,
+    ap_id: Optional[int] = None,
+    radio_id: Optional[int] = None,
     limit: int = 100,
     db: Session = Depends(get_apclient_db)
 ):
-    """Get client count data from the database."""
+    """Get AP client count data from the apclientcount database."""
     try:
-        query = db.query(ClientCountAP)
-
-        if building:
-            query = query.join(AccessPoint).join(ApBuilding).filter(ApBuilding.buildingname == building)
-
+        query = db.query(ClientCountAP).join(AccessPoint, ClientCountAP.apid == AccessPoint.apid).join(RadioType, ClientCountAP.radioid == RadioType.radioid)
+        if ap_id:
+            query = query.filter(ClientCountAP.apid == ap_id)
+        if radio_id:
+            query = query.filter(ClientCountAP.radioid == radio_id)
         query = query.order_by(ClientCountAP.timestamp.desc()).limit(limit)
         results = query.all()
-
         return [{
-            "countid": cc.countid,
+            "clientcount": cc.clientcount,
+            "apname": cc.accesspoint.apname if cc.accesspoint else None,
+            "radioname": cc.radio.radioname if cc.radio else None,
             "apid": cc.apid,
             "radioid": cc.radioid,
-            "clientcount": cc.clientcount,
-            "timestamp": cc.timestamp,
-            "apname": cc.accesspoint.apname if cc.accesspoint else None,
-            "radioname": cc.radio.radioname if cc.radio else None
+            "timestamp": cc.timestamp.isoformat() if cc.timestamp else None
         } for cc in results]
     except SQLAlchemyError as e:
         logger.error(f"Database error in /client-counts: {e}")

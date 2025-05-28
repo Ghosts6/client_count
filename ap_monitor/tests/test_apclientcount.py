@@ -47,7 +47,7 @@ def test_insert_apclientcount_data(session):
     device_info_list = [
         {
             "name": "TestAP",
-            "location": "/Global/Campus/TestBuilding/TestFloor/TestRoom",
+            "location": "Global/Campus/TestBuilding/TestFloor/TestRoom",
             "macAddress": "00:11:22:33:44:55",
             "ipAddress": "192.168.0.1",
             "model": "ModelX",
@@ -60,12 +60,12 @@ def test_insert_apclientcount_data(session):
     session.flush()
     # Debug: print all buildings
     all_buildings = session.query(ApBuilding).all()
-    print(f"All buildings in DB: {[b.buildingname for b in all_buildings]}")
+    print(f"All buildings in DB: {[b.building_name for b in all_buildings]}")
     # Check Building
-    building = session.query(ApBuilding).filter_by(buildingname="TestBuilding").first()
+    building = session.query(ApBuilding).filter_by(building_name="TestBuilding").first()
     assert building is not None
     # Check Floor
-    floor = session.query(Floor).filter_by(floorname="TestFloor", buildingid=building.buildingid).first()
+    floor = session.query(Floor).filter_by(floorname="TestFloor", building_id=building.building_id).first()
     assert floor is not None
     # Check AccessPoint
     ap = session.query(AccessPoint).filter_by(macaddress="00:11:22:33:44:55").first()
@@ -167,12 +167,12 @@ def test_create_ap_building(session):
     session.commit()
     
     # Create test data
-    building = ApBuilding(buildingname="Test Building")
+    building = ApBuilding(building_name="Test Building")
     session.add(building)
     session.commit()
     
-    assert building.buildingid is not None
-    assert building.buildingname == "Test Building"
+    assert building.building_id is not None
+    assert building.building_name == "Test Building"
 
 def test_create_floor(session):
     # Clean up existing data
@@ -185,12 +185,12 @@ def test_create_floor(session):
     session.commit()
     
     # Create test data
-    building = ApBuilding(buildingname="Test Building")
+    building = ApBuilding(building_name="Test Building")
     session.add(building)
     session.commit()
     
     floor = Floor(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorname="1st Floor"
     )
     session.add(floor)
@@ -198,7 +198,7 @@ def test_create_floor(session):
     
     assert floor.floorid is not None
     assert floor.floorname == "1st Floor"
-    assert floor.buildingid == building.buildingid
+    assert floor.building_id == building.building_id
 
 def test_create_room(session):
     # Clean up existing data
@@ -211,12 +211,12 @@ def test_create_room(session):
     session.commit()
     
     # Create test data
-    building = ApBuilding(buildingname="Test Building")
+    building = ApBuilding(building_name="Test Building")
     session.add(building)
     session.commit()
     
     floor = Floor(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorname="1st Floor"
     )
     session.add(floor)
@@ -244,12 +244,12 @@ def test_create_access_point(session):
     session.commit()
     
     # Create test data
-    building = ApBuilding(buildingname="Test Building")
+    building = ApBuilding(building_name="Test Building")
     session.add(building)
     session.commit()
     
     floor = Floor(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorname="1st Floor"
     )
     session.add(floor)
@@ -263,7 +263,7 @@ def test_create_access_point(session):
     session.commit()
     
     ap = AccessPoint(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorid=floor.floorid,
         roomid=room.roomid,
         apname="Test AP",
@@ -279,7 +279,7 @@ def test_create_access_point(session):
     assert ap.macaddress == "00:11:22:33:44:55"
     assert ap.ipaddress == "192.168.1.1"
     assert ap.modelname == "Test Model"
-    assert ap.buildingid == building.buildingid
+    assert ap.building_id == building.building_id
     assert ap.floorid == floor.floorid
     assert ap.roomid == room.roomid
 
@@ -294,12 +294,12 @@ def test_create_client_count(session):
     session.commit()
     
     # Create test data
-    building = ApBuilding(buildingname="Test Building")
+    building = ApBuilding(building_name="Test Building")
     session.add(building)
     session.commit()
     
     floor = Floor(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorname="1st Floor"
     )
     session.add(floor)
@@ -312,12 +312,8 @@ def test_create_client_count(session):
     session.add(room)
     session.commit()
     
-    radio = RadioType(radioname="2.4GHz")
-    session.add(radio)
-    session.commit()
-    
     ap = AccessPoint(
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorid=floor.floorid,
         roomid=room.roomid,
         apname="Test AP",
@@ -328,19 +324,23 @@ def test_create_client_count(session):
     session.add(ap)
     session.commit()
     
+    radio = RadioType(radioname="radio0", radioid=1)
+    session.add(radio)
+    session.commit()
+    
     client_count = ClientCountAP(
         apid=ap.apid,
         radioid=radio.radioid,
-        clientcount=5,
+        clientcount=10,
         timestamp=datetime.now(timezone.utc)
     )
     session.add(client_count)
     session.commit()
     
     assert client_count.countid is not None
-    assert client_count.clientcount == 5
     assert client_count.apid == ap.apid
     assert client_count.radioid == radio.radioid
+    assert client_count.clientcount == 10
 
 def test_get_client_count(session):
     # Clean up any existing data in the correct order
@@ -353,11 +353,11 @@ def test_get_client_count(session):
     session.commit()
 
     # Create required records
-    building = ApBuilding(buildingname="TestBuilding")
+    building = ApBuilding(building_name="TestBuilding")
     session.add(building)
     session.flush()
 
-    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    floor = Floor(floorname="TestFloor", building_id=building.building_id)
     session.add(floor)
     session.flush()
 
@@ -373,7 +373,7 @@ def test_get_client_count(session):
         modelname="ModelX",
         isactive=True,
         floorid=floor.floorid,
-        buildingid=building.buildingid
+        building_id=building.building_id
     )
     session.add(ap)
     session.commit()
@@ -406,11 +406,11 @@ def test_update_client_count(session):
     session.commit()
 
     # Create required records
-    building = ApBuilding(buildingname="TestBuilding")
+    building = ApBuilding(building_name="TestBuilding")
     session.add(building)
     session.flush()
 
-    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    floor = Floor(floorname="TestFloor", building_id=building.building_id)
     session.add(floor)
     session.flush()
 
@@ -426,7 +426,7 @@ def test_update_client_count(session):
         modelname="ModelX",
         isactive=True,
         floorid=floor.floorid,
-        buildingid=building.buildingid
+        building_id=building.building_id
     )
     session.add(ap)
     session.commit()
@@ -463,11 +463,11 @@ def test_delete_client_count(session):
     session.commit()
 
     # Create required records
-    building = ApBuilding(buildingname="TestBuilding")
+    building = ApBuilding(building_name="TestBuilding")
     session.add(building)
     session.flush()
 
-    floor = Floor(floorname="TestFloor", buildingid=building.buildingid)
+    floor = Floor(floorname="TestFloor", building_id=building.building_id)
     session.add(floor)
     session.flush()
 
@@ -483,7 +483,7 @@ def test_delete_client_count(session):
         modelname="ModelX",
         isactive=True,
         floorid=floor.floorid,
-        buildingid=building.buildingid
+        building_id=building.building_id
     )
     session.add(ap)
     session.commit()
@@ -505,3 +505,77 @@ def test_delete_client_count(session):
     # Verify the deletion
     result = session.query(ClientCountAP).first()
     assert result is None
+
+def test_insert_apclientcount_data_partial_location(session):
+    """Test handling of partial location information in AP data."""
+    # Insert radios
+    for rname, rid in radioId_map.items():
+        session.add(RadioType(radioname=rname, radioid=rid))
+    session.commit()
+
+    # Test case 1: Two-part location format (Building/Floor)
+    device_info_list = [
+        {
+            "name": "APOnlyBuilding",
+            "location": "Bethune Residence/Floor 1",
+            "macAddress": "00:11:22:33:44:01",
+            "ipAddress": "192.168.0.10",
+            "model": "ModelA",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 1}
+        }
+    ]
+    timestamp = datetime.now()
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+
+    # Check Building
+    building = session.query(ApBuilding).filter_by(building_name="Bethune Residence").first()
+    assert building is not None, "Building should be created with name 'Bethune Residence'"
+
+    # Check Floor
+    floor = session.query(Floor).filter_by(floorname="Floor 1", building_id=building.building_id).first()
+    assert floor is not None, "Floor should be created for the building"
+    assert floor.floorname == "Floor 1", "Floor should have name 'Floor 1'"
+
+    ap = session.query(AccessPoint).filter_by(macaddress="00:11:22:33:44:01").first()
+    assert ap is not None, "Access point should be created"
+    assert ap.apname == "APOnlyBuilding"
+    assert ap.building_id == building.building_id
+    assert ap.floorid == floor.floorid
+
+    session.commit()  # Ensure building and floor are persisted before next insert
+
+    # Test case 2: Five-part location format (Global/Campus/Building/Floor/Room)
+    device_info_list = [
+        {
+            "name": "APBuildingFloor",
+            "location": "Global/Keele Campus/Bethune Residence/Floor 5/Room 501",
+            "macAddress": "00:11:22:33:44:02",
+            "ipAddress": "192.168.0.11",
+            "model": "ModelB",
+            "reachabilityHealth": "UP",
+            "clientCount": {"radio0": 2}
+        }
+    ]
+    insert_apclientcount_data(device_info_list, timestamp, session=session)
+    session.flush()
+
+    # Check Building (should be "Bethune Residence" from location_parts[3])
+    building = session.query(ApBuilding).filter_by(building_name="Bethune Residence").first()
+    assert building is not None, "Building should still exist"
+
+    # Check Floor (should be "Floor 5" from location_parts[4])
+    floor = session.query(Floor).filter_by(floorname="Floor 5", building_id=building.building_id).first()
+    assert floor is not None, "New floor should be created with name 'Floor 5'"
+
+    ap = session.query(AccessPoint).filter_by(macaddress="00:11:22:33:44:02").first()
+    assert ap is not None, "Second access point should be created"
+    assert ap.apname == "APBuildingFloor"
+    assert ap.building_id == building.building_id
+    assert ap.floorid == floor.floorid
+
+    client_count = session.query(ClientCountAP).filter_by(apid=ap.apid).first()
+    assert client_count is not None, "Client count should be created"
+    assert client_count.clientcount == 2
+    assert client_count.radioid == 1  # radio0

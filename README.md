@@ -245,7 +245,7 @@ uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
-## **Automated Cleanup with pg\_cron**
+## **Automated Cleanup with pg\_Cron**
 
 This PostgreSQL setup uses the `pg_cron` extension to schedule a daily cleanup job that deletes old records (older than 30 days) from two tables:
 
@@ -321,6 +321,13 @@ SELECT cron.schedule(
 );
 ```
 
+#### **Manual Cleanup**
+To run the cleanup manually, execute:
+
+```sql
+SELECT cleanup_counts();
+```
+
 ### ✅ **Result**
 
 * The task runs every day at 3:00 AM.
@@ -328,7 +335,20 @@ SELECT cron.schedule(
 * Logs and status can be monitored via:
 
 ```sql
-SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 5;
+SELECT jobid,
+       runid,
+       status,
+       return_message,
+       start_time,
+       end_time
+FROM cron.job_run_details
+WHERE jobid = (
+  SELECT jobid
+  FROM cron.job
+  WHERE jobname = 'daily_cleanup'
+)
+ORDER BY start_time DESC
+LIMIT 5;
 ```
 
 > 🛑 You can cancel the scheduled job at any time:

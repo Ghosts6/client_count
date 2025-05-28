@@ -85,11 +85,11 @@ def test_create_client_count(wireless_db):
 def test_create_room_and_access_point(apclient_db):
     """Test creating a room and access point."""
     # Create building, floor, and room
-    building = ApBuilding(buildingname="Test Building 3")
+    building = ApBuilding(building_name="Test Building 3")
     apclient_db.add(building)
     apclient_db.commit()
 
-    floor = Floor(floorname="1st Floor", buildingid=building.buildingid)
+    floor = Floor(floorname="1st Floor", building_id=building.building_id)
     apclient_db.add(floor)
     apclient_db.commit()
 
@@ -104,7 +104,7 @@ def test_create_room_and_access_point(apclient_db):
         ipaddress="192.168.1.1",
         modelname="Cisco AP",
         isactive=True,
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorid=floor.floorid,
         roomid=room.roomid
     )
@@ -117,49 +117,48 @@ def test_create_room_and_access_point(apclient_db):
 def test_create_radio_and_client_count(apclient_db):
     """Test creating a radio type and client count."""
     # Create building, floor, room, and AP
-    building = ApBuilding(buildingname="Test Building 4")
+    building = ApBuilding(building_name="Test Building 4")
     apclient_db.add(building)
     apclient_db.commit()
 
-    floor = Floor(floorname="2nd Floor", buildingid=building.buildingid)
+    floor = Floor(floorname="1st Floor", building_id=building.building_id)
     apclient_db.add(floor)
     apclient_db.commit()
 
-    room = Room(roomname="Room 201", floorid=floor.floorid)
+    room = Room(roomname="Room 101", floorid=floor.floorid)
     apclient_db.add(room)
     apclient_db.commit()
 
     ap = AccessPoint(
-        apname="AP-02",
-        macaddress="00:11:22:33:44:66",
-        ipaddress="192.168.1.2",
+        apname="AP-01",
+        macaddress="00:11:22:33:44:55",
+        ipaddress="192.168.1.1",
         modelname="Cisco AP",
         isactive=True,
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorid=floor.floorid,
         roomid=room.roomid
     )
     apclient_db.add(ap)
     apclient_db.commit()
 
-    # Create radio type
-    radio = RadioType(radioname="2.4GHz")
+    radio = RadioType(radioname="radio0", radioid=1)
     apclient_db.add(radio)
     apclient_db.commit()
 
-    # Create client count
     client_count = ClientCountAP(
         apid=ap.apid,
         radioid=radio.radioid,
-        clientcount=5,
-        timestamp=datetime.utcnow()
+        clientcount=10,
+        timestamp=datetime.now(timezone.utc)
     )
     apclient_db.add(client_count)
     apclient_db.commit()
+
     assert client_count.countid is not None
-    assert client_count.clientcount == 5
     assert client_count.apid == ap.apid
     assert client_count.radioid == radio.radioid
+    assert client_count.clientcount == 10
 
 def test_unique_constraints(wireless_db, apclient_db):
     """Test unique constraints."""
@@ -175,11 +174,11 @@ def test_unique_constraints(wireless_db, apclient_db):
     wireless_db.rollback()
 
     # Test building name uniqueness
-    building1 = ApBuilding(buildingname="Test Building 5")
+    building1 = ApBuilding(building_name="Test Building 5")
     apclient_db.add(building1)
     apclient_db.commit()
 
-    building2 = ApBuilding(buildingname="Test Building 5")
+    building2 = ApBuilding(building_name="Test Building 5")
     apclient_db.add(building2)
     with pytest.raises(IntegrityError):
         apclient_db.commit()
@@ -216,11 +215,11 @@ def test_cascade_delete(wireless_db, apclient_db):
     assert wireless_db.query(ClientCount).filter_by(count_id=client_count.count_id).first() is None
 
     # Test apclientcount cascade
-    building = ApBuilding(buildingname="Test Building 7")
+    building = ApBuilding(building_name="Test Building 7")
     apclient_db.add(building)
     apclient_db.commit()
 
-    floor = Floor(floorname="3rd Floor", buildingid=building.buildingid)
+    floor = Floor(floorname="3rd Floor", building_id=building.building_id)
     apclient_db.add(floor)
     apclient_db.commit()
 
@@ -234,14 +233,14 @@ def test_cascade_delete(wireless_db, apclient_db):
         ipaddress="192.168.1.3",
         modelname="Cisco AP",
         isactive=True,
-        buildingid=building.buildingid,
+        building_id=building.building_id,
         floorid=floor.floorid,
         roomid=room.roomid
     )
     apclient_db.add(ap)
     apclient_db.commit()
 
-    radio = RadioType(radioname="5GHz")
+    radio = RadioType(radioname="radio0", radioid=1)
     apclient_db.add(radio)
     apclient_db.commit()
 
@@ -249,7 +248,7 @@ def test_cascade_delete(wireless_db, apclient_db):
         apid=ap.apid,
         radioid=radio.radioid,
         clientcount=5,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     apclient_db.add(client_count)
     apclient_db.commit()

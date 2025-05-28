@@ -1,4 +1,3 @@
-import logging
 import base64
 import json
 import ssl
@@ -9,12 +8,14 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from dotenv import load_dotenv
+from ap_monitor.app.db import APClientSessionLocal
+from ap_monitor.app.utils import setup_logging
 
 # Load environment variables
 load_dotenv()
 
 # Configure logger
-logger = logging.getLogger(__name__)
+logger = setup_logging()
 
 # Create SSL context that doesn't verify certificates
 ssl_context = ssl._create_unverified_context()
@@ -357,40 +358,61 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
     from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType
     close_session = False
     if session is None:
-        session = ApclientSessionLocal()
+        session = APClientSessionLocal()
         close_session = True
     try:
         radioId_map = {r.radioname: r.radioid for r in session.query(RadioType).all()}
         for device in device_info_list:
             ap_name = device['name']
-            # Try to get location from multiple fields
-            location = device.get('location')
-            if not location or len(location.split('/')) < 5:
-                snmp_location = device.get('snmpLocation')
-                if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
-                    location = snmp_location
-                else:
-                    location_name = device.get('locationName')
-                    if location_name and location_name.strip().lower() != 'null':
-                        location = location_name
-            location_parts = location.split('/') if location else []
-            if len(location_parts) < 2:
-                logger.warning(f"Skipping device {ap_name} due to missing or invalid location fields. location: {location}")
+            location = device.get('location', '')
+            
+            # Location parsing logic - handle multiple formats
+            location_parts = [p.strip() for p in location.split('/') if p.strip()] if location else []
+            
+            # Determine building, floor, and room based on different location formats
+            if len(location_parts) >= 4:
+                # Format: Global/Campus/Building/Floor[/Room]
+                building_name = location_parts[2]
+                floor_name = location_parts[3]
+                room_name = location_parts[4] if len(location_parts) > 4 else None
+            elif len(location_parts) == 3:
+                # Format: Campus/Building/Floor
+                building_name = location_parts[1]
+                floor_name = location_parts[2]
+                room_name = None
+            elif len(location_parts) == 2:
+                # Format: Building/Floor
+                building_name = location_parts[0]
+                floor_name = location_parts[1]
+                room_name = None
+            else:
+                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
                 continue
-            building_name = location_parts[-2] if len(location_parts) >= 2 else 'Unknown'
-            floor_name = location_parts[-1] if len(location_parts) >= 1 else 'Unknown'
+
             # Building
-            building = session.query(ApBuilding).filter_by(buildingname=building_name).first()
+            building = session.query(ApBuilding).filter_by(building_name=building_name).first()
             if not building:
-                building = ApBuilding(buildingname=building_name)
+                building = ApBuilding(building_name=building_name)
                 session.add(building)
                 session.flush()
+            
             # Floor
-            floor = session.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
+            floor = session.query(Floor).filter_by(floorname=floor_name, building_id=building.building_id).first()
             if not floor:
-                floor = Floor(floorname=floor_name, buildingid=building.buildingid)
+                floor = Floor(floorname=floor_name, building_id=building.building_id)
                 session.add(floor)
                 session.flush()
+            
+            # Room (optional)
+            room = None
+            if room_name:
+                room = session.query(Room).filter_by(roomname=room_name, floorid=floor.floorid).first()
+                if not room:
+                    room = Room(roomname=room_name, floorid=floor.floorid)
+                    session.add(room)
+                    session.flush()
+            
+            # Rest of the function remains the same...
             # Access Point
             mac_address = device['macAddress']
             ap = session.query(AccessPoint).filter_by(macaddress=mac_address).first()
@@ -403,30 +425,37 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
                     modelname=device.get('model'),
                     isactive=is_active,
                     floorid=floor.floorid,
-                    buildingid=building.buildingid
+                    building_id=building.building_id,
+                    roomid=room.roomid if room else None
                 )
                 session.add(ap)
                 session.flush()
             else:
                 ap.isactive = is_active
+            
             # ClientCountAP
             for radio, count in device.get('clientCount', {}).items():
                 radio_id = radioId_map.get(radio)
                 if radio_id is None:
                     logger.warning(f"Unexpected radio key: {radio}")
                     continue
-                cc = ClientCountAP(
-                    apid=ap.apid,
-                    radioid=radio_id,
-                    clientcount=count,
-                    timestamp=timestamp
-                )
-                session.add(cc)
+                cc = session.query(ClientCountAP).filter_by(apid=ap.apid, radioid=radio_id, timestamp=timestamp).first()
+                if cc:
+                    cc.clientcount = count
+                else:
+                    cc = ClientCountAP(
+                        apid=ap.apid,
+                        radioid=radio_id,
+                        clientcount=count,
+                        timestamp=timestamp
+                    )
+                    session.add(cc)
         session.commit()
         logger.info(f"Inserted/updated AP and client count data in apclientcount DB for {len(device_info_list)} devices.")
     except Exception as e:
         session.rollback()
         logger.error(f"Error inserting data into apclientcount DB: {e}")
+        raise
     finally:
         if close_session:
             session.close()

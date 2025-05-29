@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from fastapi import FastAPI, Depends, HTTPException, Query
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
@@ -161,6 +161,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+def parse_location(location: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse location string to extract building and floor names.
+    Returns (building_name, floor_name) tuple.
+    """
+    if not location or not isinstance(location, str):
+        logger.warning(f"Skipping device with empty or invalid location: {location}")
+        return None, None
+
+    parts = [p.strip() for p in location.split('/') if p.strip()]
+    # Global/Keele Campus/<Building>/<Floor...>
+    if len(parts) >= 4 and parts[0] == "Global" and parts[1] == "Keele Campus":
+        building = parts[2]
+        floor = parts[3]
+        return building, floor
+    # <Building>/<Floor...>
+    if len(parts) >= 2:
+        building = parts[0]
+        floor = parts[1]
+        return building, floor
+    logger.warning(f"Skipping device with invalid location format: {location}")
+    return None, None
+
 def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None):
     """Background task to update AP data in the database."""
     auth_manager_obj = auth_manager_obj or auth_manager
@@ -180,23 +203,16 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         # Process AP data
         for ap in aps:
             ap_name = ap.get('name')
-            location = ap.get('location', '')
-            location_parts = location.split('/') if location else []
             
-            # Handle location parsing based on real data format
-            if not location_parts:
-                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
-                continue
-                
-            # Extract building and floor from location
-            if len(location_parts) >= 5:
-                building_name = location_parts[2]  # e.g., "Bethune Residence"
-                floor_name = location_parts[3]     # e.g., "Floor 5"
-            elif len(location_parts) == 2:
-                building_name = location_parts[0]
-                floor_name = location_parts[1]
-            else:
-                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+            # Try different location fields in order of preference
+            location = ap.get('location')
+            if not location or len(location.split('/')) < 2:
+                location = ap.get('snmpLocation')
+            if not location or len(location.split('/')) < 2:
+                location = ap.get('locationName')
+            
+            building_name, floor_name = parse_location(location)
+            if not building_name or not floor_name:
                 continue
             
             # Building
@@ -303,39 +319,32 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         # Process AP data for apclientcount DB
         for ap in ap_data:
             ap_name = ap.get('name')
-            location = ap.get('location', '')
-            location_parts = location.split('/') if location else []
             
-            # Handle location parsing based on real data format
-            if not location_parts:
-                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
+            # Try different location fields in order of preference
+            location = ap.get('location')
+            if not location or len(location.split('/')) < 2:
+                location = ap.get('snmpLocation')
+            if not location or len(location.split('/')) < 2:
+                location = ap.get('locationName')
+            
+            building_name, floor_name = parse_location(location)
+            if not building_name or not floor_name:
                 continue
-                
-            # Extract building and floor from location
-            if len(location_parts) >= 5:
-                building_name = location_parts[3]  # e.g., "Keele Campus"
-                floor_name = location_parts[4]     # e.g., "Floor 5"
-            elif len(location_parts) == 2:
-                building_name = location_parts[0]
-                floor_name = location_parts[1]
-            else:
-                logger.warning(f"Skipping device {ap_name} due to invalid location format: {location}")
-                continue
-
+            
             # Building
-            building = db.query(ApBuilding).filter_by(building_name=building_name).first()
+            building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
             if not building:
-                building = ApBuilding(building_name=building_name)
+                building = ApBuilding(buildingname=building_name)
                 db.add(building)
                 db.flush()
-
+            
             # Floor
-            floor = db.query(Floor).filter_by(floorname=floor_name, building_id=building.building_id).first()
+            floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
             if not floor:
-                floor = Floor(floorname=floor_name, building_id=building.building_id)
+                floor = Floor(floorname=floor_name, buildingid=building.buildingid)
                 db.add(floor)
                 db.flush()
-
+            
             # Access Point
             mac_address = ap.get('macAddress')
             ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
@@ -350,7 +359,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                     modelname=ap.get('model'),
                     isactive=is_active,
                     floorid=floor.floorid,
-                    building_id=building.building_id
+                    buildingid=building.buildingid
                 )
                 db.add(ap_record)
                 db.flush()
@@ -358,7 +367,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                 logger.debug(f"Updating existing AccessPoint: {ap.get('name')}")
                 ap_record.isactive = is_active
                 ap_record.floorid = floor.floorid
-                ap_record.building_id = building.building_id
+                ap_record.buildingid = building.buildingid
 
             # Create client count records for each radio
             client_counts = ap.get('clientCount', {})
@@ -412,17 +421,17 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
     
     try:
         for device_info in device_info_list:
-            # Parse location
-            location = device_info.get("location", "")
-            location_parts = location.split("/")
+            ap_name = device_info.get('name')
             
-            # Determine building name based on location format
-            if len(location_parts) >= 3:
-                building_name = location_parts[2]  # e.g., "Bethune Residence"
-            elif len(location_parts) == 2:
-                building_name = location_parts[0]
-            else:
-                logger.warning(f"Skipping device {device_info.get('name')} due to invalid location format: {location}")
+            # Try different location fields in order of preference
+            location = device_info.get('location')
+            if not location or len(location.split('/')) < 2:
+                location = device_info.get('snmpLocation')
+            if not location or len(location.split('/')) < 2:
+                location = device_info.get('locationName')
+            
+            building_name, floor_name = parse_location(location)
+            if not building_name or not floor_name:
                 continue
             
             # Get or create building
@@ -433,15 +442,17 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
                 session.commit()
             
             # Get or create floor
-            floor_name = location_parts[3] if len(location_parts) >= 4 else "Unknown Floor"
             floor = session.query(Floor).filter_by(buildingid=building.buildingid, floorname=floor_name).first()
             if not floor:
                 floor = Floor(buildingid=building.buildingid, floorname=floor_name)
                 session.add(floor)
                 session.commit()
             
-            # Get or create room
-            room_name = location_parts[4] if len(location_parts) >= 5 else "Unknown Room"
+            # Get or create room (optional)
+            room_name = "Unknown Room"  # Default room name
+            if location and len(location.split('/')) > 4:
+                room_name = location.split('/')[4].strip()
+            
             room = session.query(Room).filter_by(floorid=floor.floorid, roomname=room_name).first()
             if not room:
                 room = Room(floorid=floor.floorid, roomname=room_name)

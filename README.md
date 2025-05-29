@@ -27,6 +27,7 @@ client_count/
 │   │   ├── dna_api.py
 │   │   ├── main.py
 │   │   ├── models.py
+│   │   ├── schemas.py
 │   │   └── utils.py
 │   ├── __init__.py
 │   ├── __pycache__/
@@ -34,8 +35,10 @@ client_count/
 │   ├── tests/
 │   │   ├── __init__.py
 │   │   ├── conftest.py
+│   │   ├── test_apclientcount.py
 │   │   ├── test_db.py
 │   │   ├── test_dna_api.py
+│   │   ├── test_location_parser.py
 │   │   ├── test_main.py
 │   │   ├── test_models.py
 │   │   └── test_utils.py
@@ -87,7 +90,7 @@ cd client_count
 
 ### 4. Configure Environment Variables
 
-Create a `.env` file in the root directory with the following contents:
+Create a `.env` file in the root directory with the following contents. **Note:** The default PostgreSQL port is 5432, but this project uses 3306 (edit as needed):
 
 ```env
 # Database Configuration
@@ -95,7 +98,7 @@ DB_HOST=localhost
 DB_NAME=wireless_count
 DB_USER=postgres
 DB_PASSWORD=your_password
-DB_PORT=3306
+DB_PORT=3306  
 
 APCLIENT_DB_URL=postgresql://postgres:your_password@localhost:3306/apclientcount
 
@@ -111,7 +114,7 @@ LOG_LEVEL=INFO
 ### 5. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r ap_monitor/requirements.txt
 ```
 
 ### 6. Initialize the Database
@@ -120,7 +123,7 @@ Run the function that creates your tables (once):
 
 ```bash
 source venv/bin/activate
-python -c "from app.db import init_db; init_db()"
+python -c "from ap_monitor.app.db import init_db; init_db()"
 deactivate
 ```
 
@@ -189,7 +192,7 @@ createdb -h localhost -p 3306 -U postgres wireless_count
 ### **List AP Data**
 
 - **Endpoint**: `GET /aps`
-- **Description**: Retrieves all AP data from the database.
+- **Description**: Retrieves all AP data from the database. Supports query parameters for filtering.
 
 ### **List Client Count Data**
 
@@ -200,6 +203,11 @@ createdb -h localhost -p 3306 -U postgres wireless_count
 
 - **Endpoint**: `GET /buildings`
 - **Description**: Retrieves a list of unique buildings from the client count data.
+
+### **OpenAPI Documentation**
+
+- **Endpoint**: `GET /openapi.json` and `/docs`
+- **Description**: Returns the OpenAPI schema and interactive API docs.
 
 ---
 
@@ -220,17 +228,16 @@ The application uses `pytest` for testing. Tests are located in the `tests/` dir
 - **Models**: Tests for database models (`test_models.py`).
 - **APIs**: Tests for DNA Center API integration (`test_dna_api.py`).
 - **Utilities**: Tests for utility functions like logging and scheduling (`test_utils.py`).
+- **Location Parsing**: Tests for location parsing logic (`test_location_parser.py`).
 - **Application Functionality**: Tests for FastAPI endpoints and database interactions.
 
 To run the tests, use the following command:
 
 ```bash
 TESTING=true PYTHONPATH=ap_monitor pytest -v ap_monitor/tests/
-# or
-./run_tests.sh
 ```
 
-Api end point test:
+Api endpoint test examples:
 
 ```bash
 curl -i http://localhost:8000/
@@ -238,7 +245,7 @@ curl -i http://localhost:8000/openapi.json
 curl -i http://localhost:8000/buildings
 ```
 
-run app manualy:
+Run app manually:
 
 ```bash
 uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -351,7 +358,7 @@ ORDER BY start_time DESC
 LIMIT 5;
 ```
 
-> 🛑 You can cancel the scheduled job at any time:
+### cancel the scheduled job:
 
 ```sql
 SELECT cron.unschedule('daily_cleanup');

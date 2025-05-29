@@ -119,6 +119,14 @@ def session():
     session = TestingSessionLocal()
     
     try:
+        # Initialize radio types
+        radio_types = [
+            RadioType(radioid=1, radioname="2.4GHz"),
+            RadioType(radioid=2, radioname="5GHz")
+        ]
+        session.add_all(radio_types)
+        session.commit()
+        
         yield session
     finally:
         session.close()
@@ -268,9 +276,17 @@ def test_location_parsing_invalid_formats(session, current_timestamp):
         "Global/Keele Campus/Building/",  # Empty floor
         "/Global/Keele Campus/Building/Floor 1",  # Leading slash
         "Global/Keele Campus/Building/Floor 1/",  # Trailing slash
+        "Global/Keele Campus/Building/Invalid",  # Invalid floor
     ]
     
     for location in invalid_locations:
+        # Clear all related tables before each sub-test
+        session.query(ClientCountAP).delete()
+        session.query(AccessPoint).delete()
+        session.query(Room).delete()
+        session.query(Floor).delete()
+        session.query(ApBuilding).delete()
+        session.commit()
         device_info = [{
             "name": f"AP_invalid_{location[:10]}",
             "location": location,
@@ -285,5 +301,113 @@ def test_location_parsing_invalid_formats(session, current_timestamp):
         before_count = session.query(ClientCountAP).count()
         insert_apclientcount_data(device_info, current_timestamp, session)
         after_count = session.query(ClientCountAP).count()
-        
-        assert before_count == after_count, f"Client count should not be inserted for invalid location: {location}" 
+        if before_count != after_count:
+            print(f"DEBUG: Inserted records for location '{location}':", list(session.query(ClientCountAP).all()))
+        assert before_count == after_count, f"Client count should not be inserted for invalid location: {location}"
+
+def test_location_parsing_existing_ap_update(session, current_timestamp):
+    """Test updating an existing AP's information"""
+    # First, create an initial AP
+    initial_device_info = [{
+        "name": "AP_Initial",
+        "location": "Global/Keele Campus/BuildingA/Floor 1",
+        "macAddress": "00:11:22:33:44:55",
+        "clientCount": {"2.4GHz": 5},
+        "radioType": "2.4GHz",
+        "ipAddress": "192.168.1.1",
+        "model": "AIR-CAP3702I-A-K9",
+        "reachabilityHealth": "UP"
+    }]
+    
+    # Insert initial AP
+    insert_apclientcount_data(initial_device_info, current_timestamp, session)
+    
+    # Now update the same AP with new information
+    updated_device_info = [{
+        "name": "AP_Updated",
+        "location": "Global/Keele Campus/BuildingB/Floor 2",  # Changed building and floor
+        "macAddress": "00:11:22:33:44:55",  # Same MAC address
+        "clientCount": {"2.4GHz": 10},  # Updated client count
+        "radioType": "2.4GHz",
+        "ipAddress": "192.168.1.2",  # Changed IP
+        "model": "AIR-CAP3702I-A-K9",
+        "reachabilityHealth": "DOWN"  # Changed status
+    }]
+    
+    # Update AP
+    insert_apclientcount_data(updated_device_info, current_timestamp, session)
+    
+    # Verify the AP was updated correctly
+    ap = session.query(AccessPoint).filter_by(macaddress="00:11:22:33:44:55").first()
+    assert ap is not None
+    assert ap.apname == "AP_Updated"
+    assert ap.ipaddress == "192.168.1.2"
+    assert ap.isactive is False
+    
+    # Verify building and floor were updated
+    building = session.query(ApBuilding).filter_by(buildingname="BuildingB").first()
+    assert building is not None
+    floor = session.query(Floor).filter_by(floorname="Floor 2", buildingid=building.buildingid).first()
+    assert floor is not None
+    assert ap.buildingid == building.buildingid
+    assert ap.floorid == floor.floorid
+    
+    # Verify client count was updated
+    client_count = session.query(ClientCountAP).filter_by(
+        apid=ap.apid,
+        timestamp=current_timestamp
+    ).first()
+    assert client_count is not None
+    assert client_count.clientcount == 10
+    assert client_count.radio.radioname == "2.4GHz"
+
+def test_location_parsing_existing_ap_multiple_radios(session, current_timestamp):
+    """Test updating an existing AP with multiple radio types"""
+    # First, create an initial AP with one radio
+    initial_device_info = [{
+        "name": "AP_Multi_Radio",
+        "location": "Global/Keele Campus/BuildingA/Floor 1",
+        "macAddress": "00:11:22:33:44:66",
+        "clientCount": {"2.4GHz": 5},
+        "radioType": "2.4GHz",
+        "ipAddress": "192.168.1.3",
+        "model": "AIR-CAP3702I-A-K9",
+        "reachabilityHealth": "UP"
+    }]
+    
+    # Insert initial AP
+    insert_apclientcount_data(initial_device_info, current_timestamp, session)
+    
+    # Now update the same AP with multiple radios
+    updated_device_info = [{
+        "name": "AP_Multi_Radio",
+        "location": "Global/Keele Campus/BuildingA/Floor 1",
+        "macAddress": "00:11:22:33:44:66",
+        "clientCount": {
+            "2.4GHz": 8,
+            "5GHz": 12
+        },
+        "radioType": "2.4GHz",
+        "ipAddress": "192.168.1.3",
+        "model": "AIR-CAP3702I-A-K9",
+        "reachabilityHealth": "UP"
+    }]
+    
+    # Update AP
+    insert_apclientcount_data(updated_device_info, current_timestamp, session)
+    
+    # Verify the AP exists
+    ap = session.query(AccessPoint).filter_by(macaddress="00:11:22:33:44:66").first()
+    assert ap is not None
+    
+    # Verify both radio client counts were updated
+    client_counts = session.query(ClientCountAP).filter_by(
+        apid=ap.apid,
+        timestamp=current_timestamp
+    ).all()
+    assert len(client_counts) == 2
+    
+    # Create a map of radio types to counts
+    radio_counts = {cc.radio.radioname: cc.clientcount for cc in client_counts}
+    assert radio_counts["2.4GHz"] == 8
+    assert radio_counts["5GHz"] == 12 

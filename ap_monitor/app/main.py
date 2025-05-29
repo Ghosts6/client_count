@@ -161,28 +161,64 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-def parse_location(location: str) -> Tuple[Optional[str], Optional[str]]:
+def parse_location(location: str) -> tuple:
     """
     Parse location string to extract building and floor names.
     Returns (building_name, floor_name) tuple.
     """
+    invalid_set = {None, '', 'invalid', 'none', 'unknown'}
     if not location or not isinstance(location, str):
         logger.warning(f"Skipping device with empty or invalid location: {location}")
         return None, None
 
+    # Reject locations with leading or trailing slashes
+    if location.startswith('/') or location.endswith('/'):
+        logger.warning(f"Skipping device with leading or trailing slash in location: {location}")
+        return None, None
+
+    # Remove leading/trailing slashes and split
+    location = location.strip('/')
     parts = [p.strip() for p in location.split('/') if p.strip()]
+    
+    # Validate minimum required parts
+    if len(parts) < 2:
+        logger.warning(f"Skipping device with insufficient location parts: {location}")
+        return None, None
+
     # Global/Keele Campus/<Building>/<Floor...>
-    if len(parts) >= 4 and parts[0] == "Global" and parts[1] == "Keele Campus":
+    if len(parts) >= 2 and parts[0] == "Global" and parts[1] == "Keele Campus":
+        if len(parts) < 4:
+            logger.warning(f"Skipping device with invalid Global/Keele Campus location format: {location}")
+            return None, None
         building = parts[2]
         floor = parts[3]
-        return building, floor
-    # <Building>/<Floor...>
-    if len(parts) >= 2:
+    # <Building>/<Floor...> (only if not Global/Keele Campus)
+    elif len(parts) >= 2:
         building = parts[0]
         floor = parts[1]
-        return building, floor
-    logger.warning(f"Skipping device with invalid location format: {location}")
-    return None, None
+    else:
+        logger.warning(f"Skipping device with invalid location format: {location}")
+        return None, None
+
+    # Validate building and floor names
+    if not building or str(building).strip().lower() in invalid_set:
+        logger.warning(f"Skipping device with invalid building name: {building}")
+        return None, None
+    if not floor or str(floor).strip().lower() in invalid_set:
+        logger.warning(f"Skipping device with invalid floor name: {floor}")
+        return None, None
+
+    # Additional validation for specific cases
+    if building.lower() == 'invalid' or floor.lower() == 'invalid':
+        logger.warning(f"Skipping device with explicitly invalid building/floor: {location}")
+        return None, None
+
+    # Validate that building and floor are not empty strings after stripping
+    if not building.strip() or not floor.strip():
+        logger.warning(f"Skipping device with empty building or floor after stripping: {location}")
+        return None, None
+
+    return building, floor
 
 def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None):
     """Background task to update AP data in the database."""
@@ -430,8 +466,15 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
             if not location or len(location.split('/')) < 2:
                 location = device_info.get('locationName')
             
+            # Parse and validate location
             building_name, floor_name = parse_location(location)
-            if not building_name or not floor_name:
+            if building_name is None or floor_name is None:
+                logger.warning(f"Skipping device with invalid location: {location}")
+                continue
+            
+            # Additional validation before proceeding
+            if not building_name.strip() or not floor_name.strip():
+                logger.warning(f"Skipping device with empty building or floor after validation: {location}")
                 continue
             
             # Get or create building
@@ -439,14 +482,14 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
             if not building:
                 building = ApBuilding(buildingname=building_name)
                 session.add(building)
-                session.commit()
+                session.flush()
             
             # Get or create floor
             floor = session.query(Floor).filter_by(buildingid=building.buildingid, floorname=floor_name).first()
             if not floor:
                 floor = Floor(buildingid=building.buildingid, floorname=floor_name)
                 session.add(floor)
-                session.commit()
+                session.flush()
             
             # Get or create room (optional)
             room_name = "Unknown Room"  # Default room name
@@ -457,60 +500,67 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
             if not room:
                 room = Room(floorid=floor.floorid, roomname=room_name)
                 session.add(room)
-                session.commit()
+                session.flush()
             
             # Get or create access point
-            ap = session.query(AccessPoint).filter_by(macaddress=device_info["macAddress"]).first()
+            mac_address = device_info["macAddress"]
+            ap = session.query(AccessPoint).filter_by(macaddress=mac_address).first()
+            
             if not ap:
+                logger.debug(f"Creating new AccessPoint: {ap_name} with MAC: {mac_address}")
                 ap = AccessPoint(
                     buildingid=building.buildingid,
                     floorid=floor.floorid,
                     roomid=room.roomid,
-                    apname=device_info["name"],
-                    macaddress=device_info["macAddress"],
+                    apname=ap_name,
+                    macaddress=mac_address,
                     ipaddress=device_info["ipAddress"],
                     modelname=device_info["model"],
                     isactive=device_info["reachabilityHealth"] == "UP"
                 )
                 session.add(ap)
-                session.commit()
+                session.flush()
             else:
-                # Update existing AP
-                ap.apname = device_info["name"]
+                logger.debug(f"Updating existing AccessPoint: {ap_name}")
+                ap.apname = ap_name
                 ap.ipaddress = device_info["ipAddress"]
                 ap.modelname = device_info["model"]
                 ap.isactive = device_info["reachabilityHealth"] == "UP"
-                session.commit()
+                ap.buildingid = building.buildingid
+                ap.floorid = floor.floorid
+                ap.roomid = room.roomid
+                session.flush()
             
             # Update client counts
             client_counts = device_info.get("clientCount", {})
             for radio_name, count in client_counts.items():
-                if radio_name not in radio_id_map:
+                radio = session.query(RadioType).filter_by(radioname=radio_name).first()
+                if not radio:
                     logger.warning(f"Skipping unexpected radio key: {radio_name}")
                     continue
                 
-                radio_id = radio_id_map[radio_name]
                 client_count = session.query(ClientCountAP).filter_by(
                     apid=ap.apid,
-                    radioid=radio_id
+                    radioid=radio.radioid,
+                    timestamp=timestamp
                 ).first()
                 
                 if client_count:
                     client_count.clientcount = count
-                    client_count.timestamp = timestamp
                 else:
                     client_count = ClientCountAP(
                         apid=ap.apid,
-                        radioid=radio_id,
+                        radioid=radio.radioid,
                         clientcount=count,
                         timestamp=timestamp
                     )
                     session.add(client_count)
-            
-            session.commit()
+        
+        session.commit()
+        logger.info("AP data updated successfully in apclientcount DB")
             
     except Exception as e:
-        logger.error(f"Error inserting data into apclientcount DB: {str(e)}")
+        logger.error(f"Error updating client count data: {str(e)}")
         session.rollback()
         raise
 

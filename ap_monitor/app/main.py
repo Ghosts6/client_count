@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
 import os
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 from ap_monitor.app.db import get_wireless_db, get_apclient_db, init_db, WirelessBase, APClientBase
 from ap_monitor.app.models import (
@@ -30,6 +31,8 @@ from ap_monitor.app.schemas import (
     RadioTypeCreate, RadioTypeResponse,
     ClientCountAPCreate, ClientCountAPResponse
 )
+
+TORONTO_TZ = ZoneInfo("America/Toronto")
 
 def get_database_url():
     if os.getenv("TESTING", "false").lower() == "true":
@@ -96,7 +99,8 @@ scheduler = BackgroundScheduler(
         'coalesce': True,  # Only run once if multiple executions are missed
         'max_instances': 1,  # Only one instance of a job can run at a time
         'misfire_grace_time': 60  # Allow jobs to run up to 60 seconds late
-    }
+    },
+    timezone=TORONTO_TZ
 )
 
 # Create auth manager for DNA Center API
@@ -125,7 +129,7 @@ def reschedule_job(job_id, func, next_run, scheduler_obj=None):
             name=job_name,
             replace_existing=True,
         )
-        logger.info(f"Next {job_id} scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Next {job_id} scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     except Exception as e:
         logger.error(f"Error rescheduling job {job_id}: {e}")
 
@@ -157,7 +161,7 @@ async def lifespan(app: FastAPI):
 
         # Schedule tasks
         next_run = calculate_next_run_time()
-        logger.info(f"First scheduled run at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"First scheduled run at: {next_run.strftime('%Y-%m-%d %H:%M:%S %Z')} (Server time: {datetime.now(TORONTO_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')})")
 
         # Clean up any existing jobs
         cleanup_job("update_ap_data_task")
@@ -366,15 +370,21 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         next_run = calculate_next_run_time()
         reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
 
-def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None):
+def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None, wireless_db=None):
     """Background task to update client count data in the database."""
     auth_manager_obj = auth_manager_obj or auth_manager
     fetch_client_counts_func = fetch_client_counts_func or fetch_client_counts
     fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
+    close_wireless_db = False
     if db is None:
         db = next(get_apclient_db())  # Use apclient_db instead of wireless_db
         close_db = True
+    
+    # Get wireless_db session for updating wireless_count DB
+    if wireless_db is None:
+        wireless_db = next(get_wireless_db())
+        close_wireless_db = True
     try:
         logger.info("Running scheduled task: update_client_count_task")
         now = datetime.now(timezone.utc)
@@ -383,6 +393,9 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         # Fetch data from DNA Center API
         ap_data = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
         site_data = fetch_client_counts_func(auth_manager_obj, rounded_unix_timestamp)
+        
+        # Dictionary to store building totals
+        building_totals = {}
         
         # Process AP data for apclientcount DB
         for ap in ap_data:
@@ -437,8 +450,9 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                 ap_record.floorid = floor.floorid
                 ap_record.buildingid = building.buildingid
 
-            # Create client count records for each radio
+            # Create client count records for each radio and track building totals
             client_counts = ap.get('clientCount', {})
+            building_total = 0
             for radio_name, count in client_counts.items():
                 radio = db.query(RadioType).filter_by(radioname=radio_name).first()
                 if not radio:
@@ -462,17 +476,41 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                         timestamp=now
                     )
                     db.add(cc)
+                building_total += count
+            
+            # Add to building totals
+            if building_name not in building_totals:
+                building_totals[building_name] = 0
+            building_totals[building_name] += building_total
         
+        # Update wireless_count DB with building totals
+        for building_name, total_clients in building_totals.items():
+            # Find building in wireless_count DB
+            building = wireless_db.query(Building).filter_by(building_name=building_name).first()
+            if building:
+                # Create new client count record
+                client_count = ClientCount(
+                    building_id=building.building_id,
+                    client_count=total_clients,
+                    time_inserted=now
+                )
+                wireless_db.add(client_count)
+        
+        # Commit both databases
         db.commit()
-        logger.info("Client count data updated successfully in apclientcount DB")
+        wireless_db.commit()
+        logger.info("Client count data updated successfully in both databases")
 
     except Exception as e:
         db.rollback()
+        wireless_db.rollback()
         logger.error(f"Error updating client count data: {e}")
         raise  # Re-raise to trigger scheduler's error handling
     finally:
         if close_db:
             db.close()
+        if close_wireless_db:
+            wireless_db.close()
         next_run = calculate_next_run_time()
         reschedule_job("update_client_count_task", update_client_count_task, next_run)
 
@@ -941,9 +979,8 @@ def health_check():
         }
 
 def calculate_next_run_time():
-    """Calculate the next run time rounded up to the next 5-minute mark (UTC, offset-aware)."""
-    now = datetime.now(timezone.utc)
-    # Round up to the next 5-minute mark
+    """Calculate the next run time rounded up to the next 5-minute mark (Toronto local time, offset-aware)."""
+    now = datetime.now(TORONTO_TZ)
     minute = (now.minute // 5 + 1) * 5
     if minute >= 60:
         next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)

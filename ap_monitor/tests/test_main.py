@@ -133,6 +133,26 @@ def client(wireless_db, apclient_db, scheduler):
     app.dependency_overrides.clear()
 
 @pytest.fixture(scope="function")
+def wireless_db():
+    """Create a test database for wireless_count."""
+    test_engine = create_engine("sqlite:///test_wireless.db", connect_args={"check_same_thread": False})
+    Session = sessionmaker(bind=test_engine)
+    session = Session()
+    
+    try:
+        # Drop all tables first to ensure clean state
+        WirelessBase.metadata.drop_all(test_engine)
+        # Create tables in correct order
+        WirelessBase.metadata.create_all(test_engine)
+        
+        yield session
+    finally:
+        session.close()
+        WirelessBase.metadata.drop_all(test_engine)
+        if os.path.exists("test_wireless.db"):
+            os.remove("test_wireless.db")
+
+@pytest.fixture(scope="function")
 def apclient_db():
     """Create a test database for apclientcount."""
     # Use a file-based SQLite DB to share across connections
@@ -146,7 +166,7 @@ def apclient_db():
         # Create tables in correct order
         APClientBase.metadata.create_all(test_engine)
         
-        # Create radio types only
+        # Create radio types
         radio_types = [
             RadioType(radioname="radio0", radioid=1),
             RadioType(radioname="radio1", radioid=2),
@@ -156,27 +176,22 @@ def apclient_db():
             session.add(radio_type)
         session.commit()
         
+        # Create test building
+        ap_building = ApBuilding(buildingname="Test Building")
+        session.add(ap_building)
+        session.commit()
+        
+        # Create test floor
+        floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
+        session.add(floor)
+        session.commit()
+        
         yield session
     finally:
         session.close()
         APClientBase.metadata.drop_all(test_engine)
         if os.path.exists("test_apclient.db"):
             os.remove("test_apclient.db")
-
-@pytest.fixture(scope="function")
-def wireless_db():
-    """Create a test database for wireless_count."""
-    test_engine = create_engine("sqlite:///test_wireless.db", connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=test_engine)
-    session = Session()
-    WirelessBase.metadata.create_all(test_engine)
-    try:
-        yield session
-    finally:
-        session.close()
-        WirelessBase.metadata.drop_all(test_engine)
-        if os.path.exists("test_wireless.db"):
-            os.remove("test_wireless.db")
 
 @pytest.fixture
 def test_data(wireless_db, apclient_db):
@@ -501,7 +516,7 @@ def test_update_ap_data_task_failure(mock_db, mock_auth_manager):
         mock_db.rollback.assert_called_once()
         mock_db.commit.assert_not_called()
 
-def test_update_client_count_task_success(mock_db, mock_auth_manager):
+def test_update_client_count_task_success(mock_db, mock_auth_manager, wireless_db):
     """Test successful client count update task."""
     mock_ap_data = [
         {
@@ -521,7 +536,7 @@ def test_update_client_count_task_success(mock_db, mock_auth_manager):
 
     with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data), \
          patch("ap_monitor.app.main.fetch_client_counts", return_value=mock_site_data):
-        update_client_count_task(mock_db, mock_auth_manager)
+        update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
         mock_db.commit.assert_called_once()
         mock_db.rollback.assert_not_called()
 
@@ -574,5 +589,208 @@ def test_calculate_next_run_time():
     assert next_run.minute % 5 == 0
     assert next_run.second == 0
     assert next_run.microsecond == 0
+
+def test_wireless_count_db_creation(wireless_db):
+    """Test that wireless_count database tables are created correctly."""
+    # Check if tables exist
+    inspector = inspect(wireless_db.get_bind())
+    tables = inspector.get_table_names()
+    
+    # Verify essential tables exist
+    assert 'buildings' in tables
+    assert 'client_counts' in tables
+    assert 'campuses' in tables
+    
+    # Verify table structures
+    buildings_columns = {col['name'] for col in inspector.get_columns('buildings')}
+    assert 'building_id' in buildings_columns
+    assert 'building_name' in buildings_columns
+    assert 'campus_id' in buildings_columns
+    assert 'latitude' in buildings_columns
+    assert 'longitude' in buildings_columns
+    
+    client_counts_columns = {col['name'] for col in inspector.get_columns('client_counts')}
+    assert 'count_id' in client_counts_columns
+    assert 'building_id' in client_counts_columns
+    assert 'client_count' in client_counts_columns
+    assert 'time_inserted' in client_counts_columns
+
+def test_wireless_count_data_update(wireless_db, apclient_db):
+    """Test that client counts are properly aggregated and stored in wireless_count DB."""
+    # Create test data
+    campus = Campus(campus_name="Test Campus 1")  # Changed to avoid unique constraint
+    wireless_db.add(campus)
+    wireless_db.commit()
+    
+    building = Building(
+        building_name="Test Building 1",  # Changed to avoid unique constraint
+        campus_id=campus.campus_id,
+        latitude=43.7735473000,
+        longitude=-79.5062752000
+    )
+    wireless_db.add(building)
+    wireless_db.commit()
+    
+    # Create AP building and access points
+    ap_building = ApBuilding(buildingname="Test Building 1")  # Match the building name
+    apclient_db.add(ap_building)
+    apclient_db.commit()
+    
+    floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
+    apclient_db.add(floor)
+    apclient_db.commit()
+    
+    # Create test APs with client counts
+    test_aps = [
+        {
+            "name": "AP1",
+            "macAddress": "00:11:22:33:44:55",
+            "ipAddress": "192.168.1.1",
+            "model": "Test Model",
+            "reachabilityHealth": "UP",
+            "location": "Test Building 1/Floor 1",  # Match the building name
+            "clientCount": {
+                "radio0": 10,
+                "radio1": 15,
+                "radio2": 5
+            }
+        },
+        {
+            "name": "AP2",
+            "macAddress": "00:11:22:33:44:56",
+            "ipAddress": "192.168.1.2",
+            "model": "Test Model",
+            "reachabilityHealth": "UP",
+            "location": "Test Building 1/Floor 1",  # Match the building name
+            "clientCount": {
+                "radio0": 20,
+                "radio1": 25,
+                "radio2": 15
+            }
+        }
+    ]
+    
+    # Mock the API responses
+    mock_auth = Mock()
+    mock_auth.get_token.return_value = "test_token"
+    
+    with patch("ap_monitor.app.main.fetch_ap_data", return_value=test_aps), \
+         patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
+         patch("ap_monitor.app.main.scheduler.add_job"):
+        
+        # Run the update task
+        update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db)
+        
+        # Verify wireless_count DB updates
+        client_counts = wireless_db.query(ClientCount).filter_by(building_id=building.building_id).all()
+        assert len(client_counts) > 0
+        
+        # Calculate expected total (sum of all radio counts for all APs)
+        expected_total = sum(
+            sum(ap["clientCount"].values())
+            for ap in test_aps
+        )
+        
+        # Verify the total client count
+        latest_count = wireless_db.query(ClientCount)\
+            .filter_by(building_id=building.building_id)\
+            .order_by(ClientCount.time_inserted.desc())\
+            .first()
+        
+        assert latest_count is not None
+        assert latest_count.client_count == expected_total
+
+def test_wireless_count_multiple_updates(wireless_db, apclient_db):
+    """Test that multiple updates to wireless_count DB work correctly."""
+    # Create test data
+    campus = Campus(campus_name="Test Campus 2")  # Changed to avoid unique constraint
+    wireless_db.add(campus)
+    wireless_db.commit()
+    
+    building = Building(
+        building_name="Test Building 2",  # Changed to avoid unique constraint
+        campus_id=campus.campus_id,
+        latitude=43.7735473000,
+        longitude=-79.5062752000
+    )
+    wireless_db.add(building)
+    wireless_db.commit()
+    
+    # Create AP building
+    ap_building = ApBuilding(buildingname="Test Building 2")  # Match the building name
+    apclient_db.add(ap_building)
+    apclient_db.commit()
+    
+    floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
+    apclient_db.add(floor)
+    apclient_db.commit()
+    
+    # Test data for two different time points
+    test_data = [
+        {
+            "aps": [
+                {
+                    "name": "AP1",
+                    "macAddress": "00:11:22:33:44:55",
+                    "ipAddress": "192.168.1.1",
+                    "model": "Test Model",
+                    "reachabilityHealth": "UP",
+                    "location": "Test Building 2/Floor 1",  # Match the building name
+                    "clientCount": {
+                        "radio0": 10,
+                        "radio1": 15,
+                        "radio2": 5
+                    }
+                }
+            ],
+            "expected_total": 30
+        },
+        {
+            "aps": [
+                {
+                    "name": "AP1",
+                    "macAddress": "00:11:22:33:44:55",
+                    "ipAddress": "192.168.1.1",
+                    "model": "Test Model",
+                    "reachabilityHealth": "UP",
+                    "location": "Test Building 2/Floor 1",  # Match the building name
+                    "clientCount": {
+                        "radio0": 20,
+                        "radio1": 25,
+                        "radio2": 15
+                    }
+                }
+            ],
+            "expected_total": 60
+        }
+    ]
+    
+    mock_auth = Mock()
+    mock_auth.get_token.return_value = "test_token"
+    
+    # Run updates for each test data set
+    for test_set in test_data:
+        with patch("ap_monitor.app.main.fetch_ap_data", return_value=test_set["aps"]), \
+             patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
+             patch("ap_monitor.app.main.scheduler.add_job"):
+            
+            update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db)
+            
+            # Verify the update
+            latest_count = wireless_db.query(ClientCount)\
+                .filter_by(building_id=building.building_id)\
+                .order_by(ClientCount.time_inserted.desc())\
+                .first()
+            
+            assert latest_count is not None
+            assert latest_count.client_count == test_set["expected_total"]
+    
+    # Verify we have multiple records
+    all_counts = wireless_db.query(ClientCount)\
+        .filter_by(building_id=building.building_id)\
+        .order_by(ClientCount.time_inserted.desc())\
+        .all()
+    
+    assert len(all_counts) >= len(test_data)
 
 

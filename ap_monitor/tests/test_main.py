@@ -6,7 +6,7 @@ from ap_monitor.app.main import app, update_ap_data_task, update_client_count_ta
 from ap_monitor.app.models import (
     AccessPoint, ClientCount, Building, Floor, Campus, ApBuilding, Room, RadioType, ClientCountAP
 )
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 from ap_monitor.app.db import WirelessBase, APClientBase
@@ -19,6 +19,14 @@ from unittest.mock import ANY
 import logging
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from unittest.mock import Mock
+from apscheduler.triggers.date import DateTrigger
+from ap_monitor.app.main import (
+    cleanup_job,
+    reschedule_job,
+    calculate_next_run_time,
+    health_check
+)
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -415,5 +423,156 @@ def test_update_ap_data_task(mock_auth, client, override_get_db_with_mock_aps):
     except Exception as e:
         logger.error(f"Error in AP data update test: {str(e)}")
         raise
+
+@pytest.fixture
+def mock_scheduler():
+    """Create a mock scheduler for testing."""
+    scheduler = Mock(spec=BackgroundScheduler)
+    scheduler.get_job.return_value = None
+    scheduler.get_jobs.return_value = []
+    scheduler.running = True
+    return scheduler
+
+@pytest.fixture
+def mock_db():
+    """Create a mock database session."""
+    db = Mock()
+    db.commit = Mock()
+    db.rollback = Mock()
+    db.close = Mock()
+    return db
+
+@pytest.fixture
+def mock_auth_manager():
+    """Create a mock auth manager."""
+    auth_manager = Mock()
+    auth_manager.get_token.return_value = "test_token"
+    return auth_manager
+
+def test_cleanup_job(mock_scheduler):
+    """Test job cleanup functionality."""
+    # Test successful cleanup
+    job_id = "test_job"
+    mock_scheduler.get_job.return_value = Mock()
+    cleanup_job(job_id, scheduler_obj=mock_scheduler)
+    mock_scheduler.remove_job.assert_called_once_with(job_id)
+
+    # Test cleanup of non-existent job
+    mock_scheduler.reset_mock()
+    mock_scheduler.get_job.return_value = None
+    cleanup_job(job_id, scheduler_obj=mock_scheduler)
+    mock_scheduler.remove_job.assert_not_called()
+
+def test_reschedule_job(mock_scheduler):
+    """Test job rescheduling functionality."""
+    job_id = "test_job"
+    func = Mock()
+    next_run = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    reschedule_job(job_id, func, next_run, scheduler_obj=mock_scheduler)
+    mock_scheduler.add_job.assert_called_once()
+    call_args = mock_scheduler.add_job.call_args[1]
+    assert call_args["func"] == func
+    assert call_args["trigger"].run_date == next_run
+    assert call_args["id"] == job_id
+    assert call_args["replace_existing"] is True
+
+def test_update_ap_data_task_success(mock_db, mock_auth_manager):
+    """Test successful AP data update task."""
+    mock_ap_data = [
+        {
+            "deviceName": "test_ap",
+            "macAddress": "00:11:22:33:44:55",
+            "location": "Test/Location",
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+        }
+    ]
+
+    with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data):
+        update_ap_data_task(mock_db, mock_auth_manager)
+        mock_db.commit.assert_called_once()
+        mock_db.rollback.assert_not_called()
+
+def test_update_ap_data_task_failure(mock_db, mock_auth_manager):
+    """Test AP data update task with error handling."""
+    with patch("ap_monitor.app.main.fetch_ap_data", side_effect=Exception("API Error")):
+        with pytest.raises(Exception):
+            update_ap_data_task(mock_db, mock_auth_manager)
+        mock_db.rollback.assert_called_once()
+        mock_db.commit.assert_not_called()
+
+def test_update_client_count_task_success(mock_db, mock_auth_manager):
+    """Test successful client count update task."""
+    mock_ap_data = [
+        {
+            "deviceName": "test_ap",
+            "macAddress": "00:11:22:33:44:55",
+            "location": "Test/Location",
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+        }
+    ]
+    mock_site_data = [
+        {
+            "siteName": "Test Site",
+            "clientCount": 10,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+        }
+    ]
+
+    with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data), \
+         patch("ap_monitor.app.main.fetch_client_counts", return_value=mock_site_data):
+        update_client_count_task(mock_db, mock_auth_manager)
+        mock_db.commit.assert_called_once()
+        mock_db.rollback.assert_not_called()
+
+def test_update_client_count_task_failure(mock_db, mock_auth_manager):
+    """Test client count update task with error handling."""
+    with patch("ap_monitor.app.main.fetch_ap_data", side_effect=Exception("API Error")):
+        with pytest.raises(Exception):
+            update_client_count_task(mock_db, mock_auth_manager)
+        mock_db.rollback.assert_called_once()
+        mock_db.commit.assert_not_called()
+
+def test_health_check_healthy(mock_scheduler):
+    """Test health check endpoint when system is healthy."""
+    mock_job = Mock()
+    mock_job.id = "test_job"
+    mock_job.name = "Test Job"
+    mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+    mock_scheduler.get_jobs.return_value = [mock_job]
+
+    with patch("ap_monitor.app.main.scheduler", mock_scheduler):
+        response = health_check()
+        assert response["status"] == "healthy"
+        assert response["scheduler"]["running"] is True
+        assert len(response["scheduler"]["jobs"]) == 1
+        assert response["scheduler"]["jobs"][0]["id"] == "test_job"
+        assert response["scheduler"]["jobs"][0]["state"] == "running"
+
+def test_health_check_unhealthy(mock_scheduler):
+    """Test health check endpoint when system is unhealthy."""
+    mock_scheduler.get_jobs.side_effect = Exception("Scheduler Error")
+
+    with patch("ap_monitor.app.main.scheduler", mock_scheduler):
+        response = health_check()
+        assert response["status"] == "unhealthy"
+        assert "error" in response
+        assert "Scheduler Error" in response["error"]
+
+def test_calculate_next_run_time():
+    """Test next run time calculation."""
+    now = datetime.now(timezone.utc)
+    next_run = calculate_next_run_time()
+    
+    # Next run should be in the future
+    assert next_run > now
+    
+    # Next run should be within 5 minutes
+    assert next_run - now <= timedelta(minutes=5)
+    
+    # Next run should be on a 5-minute boundary
+    assert next_run.minute % 5 == 0
+    assert next_run.second == 0
+    assert next_run.microsecond == 0
 
 

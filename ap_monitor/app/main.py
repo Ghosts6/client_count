@@ -91,10 +91,43 @@ else:
 initialize_database()
 
 # Initialize scheduler
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(
+    job_defaults={
+        'coalesce': True,  # Only run once if multiple executions are missed
+        'max_instances': 1,  # Only one instance of a job can run at a time
+        'misfire_grace_time': 60  # Allow jobs to run up to 60 seconds late
+    }
+)
 
 # Create auth manager for DNA Center API
 auth_manager = AuthManager()
+
+def cleanup_job(job_id, scheduler_obj=None):
+    """Clean up a job and its instances."""
+    scheduler_obj = scheduler_obj or scheduler
+    try:
+        if scheduler_obj.get_job(job_id):
+            scheduler_obj.remove_job(job_id)
+            logger.info(f"Removed job {job_id}")
+    except Exception as e:
+        logger.error(f"Error cleaning up job {job_id}: {e}")
+
+def reschedule_job(job_id, func, next_run, scheduler_obj=None):
+    """Reschedule a job with proper cleanup."""
+    scheduler_obj = scheduler_obj or scheduler
+    try:
+        cleanup_job(job_id, scheduler_obj)
+        job_name = f"{getattr(func, '__name__', repr(func))} Task"
+        scheduler_obj.add_job(
+            func=func,
+            trigger=DateTrigger(run_date=next_run),
+            id=job_id,
+            name=job_name,
+            replace_existing=True,
+        )
+        logger.info(f"Next {job_id} scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+    except Exception as e:
+        logger.error(f"Error rescheduling job {job_id}: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -126,6 +159,11 @@ async def lifespan(app: FastAPI):
         next_run = calculate_next_run_time()
         logger.info(f"First scheduled run at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
+        # Clean up any existing jobs
+        cleanup_job("update_ap_data_task")
+        cleanup_job("update_client_count_task")
+
+        # Add new jobs
         scheduler.add_job(
             func=update_ap_data_task,
             trigger=DateTrigger(run_date=next_run),
@@ -321,18 +359,12 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
     except Exception as e:
         db.rollback()
         logger.error(f"Error updating AP data: {e}")
+        raise  # Re-raise to trigger scheduler's error handling
     finally:
         if close_db:
             db.close()
         next_run = calculate_next_run_time()
-        scheduler.add_job(
-            func=update_ap_data_task,
-            trigger=DateTrigger(run_date=next_run),
-            id="update_ap_data_task",
-            name="Update AP Data Task",
-            replace_existing=True,
-        )
-        logger.info(f"Next AP data update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
 
 def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None):
     """Background task to update client count data in the database."""
@@ -437,18 +469,12 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
     except Exception as e:
         db.rollback()
         logger.error(f"Error updating client count data: {e}")
+        raise  # Re-raise to trigger scheduler's error handling
     finally:
         if close_db:
             db.close()
         next_run = calculate_next_run_time()
-        scheduler.add_job(
-            func=update_client_count_task,
-            trigger=DateTrigger(run_date=next_run),
-            id="update_client_count_task",
-            name="Update Client Count Task",
-            replace_existing=True,
-        )
-        logger.info(f"Next client count update scheduled at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        reschedule_job("update_client_count_task", update_client_count_task, next_run)
 
 def insert_apclientcount_data(device_info_list, timestamp, session=None):
     """Insert AP client count data into the database."""
@@ -883,3 +909,44 @@ def trigger_update_ap_data():
     except Exception as e:
         logger.error(f"Error triggering AP data update task: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Add health check endpoint
+@app.get("/health")
+def health_check():
+    """Check the health of the application and scheduler."""
+    try:
+        scheduler_status = {
+            "running": scheduler.running,
+            "jobs": [
+                {
+                    "id": job.id,
+                    "name": job.name,
+                    "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
+                    "state": "running" if job.next_run_time and job.next_run_time > datetime.now(timezone.utc) else "idle"
+                }
+                for job in scheduler.get_jobs()
+            ]
+        }
+        return {
+            "status": "healthy",
+            "scheduler": scheduler_status,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+def calculate_next_run_time():
+    """Calculate the next run time rounded up to the next 5-minute mark (UTC, offset-aware)."""
+    now = datetime.now(timezone.utc)
+    # Round up to the next 5-minute mark
+    minute = (now.minute // 5 + 1) * 5
+    if minute >= 60:
+        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        return next_hour
+    else:
+        return now.replace(minute=minute, second=0, microsecond=0)

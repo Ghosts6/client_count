@@ -31,6 +31,7 @@ from ap_monitor.app.schemas import (
     RadioTypeCreate, RadioTypeResponse,
     ClientCountAPCreate, ClientCountAPResponse
 )
+from .diagnostics import generate_diagnostic_report, analyze_zero_count_buildings, monitor_building_health
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
@@ -371,31 +372,36 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
 
 def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None, wireless_db=None):
-    """Background task to update client count data in the database."""
-    auth_manager_obj = auth_manager_obj or auth_manager
-    fetch_client_counts_func = fetch_client_counts_func or fetch_client_counts
-    fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
+    """Update client count data from DNA Center API."""
     close_db = False
     close_wireless_db = False
-    if db is None:
-        db = next(get_apclient_db())  # Use apclient_db instead of wireless_db
-        close_db = True
     
-    # Get wireless_db session for updating wireless_count DB
-    if wireless_db is None:
-        wireless_db = next(get_wireless_db())
-        close_wireless_db = True
     try:
-        logger.info("Running scheduled task: update_client_count_task")
+        # Get database sessions if not provided
+        if db is None:
+            db = next(get_apclient_db())
+            close_db = True
+        if wireless_db is None:
+            wireless_db = next(get_wireless_db())
+            close_wireless_db = True
+        
+        # Get current time for timestamps
         now = datetime.now(timezone.utc)
-        rounded_unix_timestamp = int(now.timestamp() * 1000)
+        rounded_unix_timestamp = int(now.timestamp())
         
-        # Fetch data from DNA Center API
-        ap_data = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
-        site_data = fetch_client_counts_func(auth_manager_obj, rounded_unix_timestamp)
+        # Dual-path logic for fetching AP/client count data
+        if fetch_client_counts_func:
+            ap_data = fetch_client_counts_func(auth_manager_obj, rounded_unix_timestamp)
+        elif fetch_ap_data_func:
+            ap_data = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
+        else:
+            ap_data = fetch_client_counts(auth_manager_obj, rounded_unix_timestamp)
         
-        # Dictionary to store building totals
+        # Track building totals
         building_totals = {}
+        
+        # Get all buildings from wireless_count DB
+        wireless_buildings = {b.building_name.lower(): b for b in wireless_db.query(Building).all()}
         
         # Process AP data for apclientcount DB
         for ap in ap_data:
@@ -412,21 +418,21 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             if not building_name or not floor_name:
                 continue
             
-            # Building
+            # Building - Use apclient_db (db) for ApBuilding model
             building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
             if not building:
                 building = ApBuilding(buildingname=building_name)
                 db.add(building)
                 db.flush()
             
-            # Floor
+            # Floor - Use apclient_db (db) for Floor model
             floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
             if not floor:
                 floor = Floor(floorname=floor_name, buildingid=building.buildingid)
                 db.add(floor)
                 db.flush()
             
-            # Access Point
+            # Access Point - Use apclient_db (db) for AccessPoint model
             mac_address = ap.get('macAddress')
             ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
             is_active = ap.get('reachabilityHealth') == "UP"
@@ -454,12 +460,13 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             client_counts = ap.get('clientCount', {})
             building_total = 0
             for radio_name, count in client_counts.items():
+                # Use apclient_db (db) for RadioType model
                 radio = db.query(RadioType).filter_by(radioname=radio_name).first()
                 if not radio:
                     logger.warning(f"Unexpected radio key: {radio_name}")
                     continue
 
-                # Check for existing record
+                # Check for existing record - Use apclient_db (db) for ClientCountAP model
                 cc = db.query(ClientCountAP).filter_by(
                     apid=ap_record.apid,
                     radioid=radio.radioid,
@@ -485,16 +492,30 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         
         # Update wireless_count DB with building totals
         for building_name, total_clients in building_totals.items():
-            # Find building in wireless_count DB
-            building = wireless_db.query(Building).filter_by(building_name=building_name).first()
+            # Find building in wireless_count DB using case-insensitive comparison
+            building = wireless_buildings.get(building_name.lower())
             if building:
-                # Create new client count record
+                # Create new client count record - Use wireless_db for ClientCount model
                 client_count = ClientCount(
                     building_id=building.building_id,
                     client_count=total_clients,
                     time_inserted=now
                 )
                 wireless_db.add(client_count)
+            else:
+                logger.warning(f"Building {building_name} not found in wireless_count database")
+        
+        # Handle buildings with no APs or zero counts
+        for building_name, building in wireless_buildings.items():
+            if building_name.lower() not in {k.lower() for k in building_totals}:
+                # Create zero count record for buildings with no APs - Use wireless_db for ClientCount model
+                client_count = ClientCount(
+                    building_id=building.building_id,
+                    client_count=0,
+                    time_inserted=now
+                )
+                wireless_db.add(client_count)
+                logger.info(f"Created zero count record for building {building_name}")
         
         # Commit both databases
         db.commit()
@@ -987,3 +1008,57 @@ def calculate_next_run_time():
         return next_hour
     else:
         return now.replace(minute=minute, second=0, microsecond=0)
+
+@app.get("/diagnostics/zero-counts")
+async def get_zero_count_diagnostics():
+    """
+    Get detailed analysis of buildings with zero client counts.
+    Only works when ENABLE_DIAGNOSTICS=true.
+    """
+    try:
+        report = analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager)
+        if "message" in report and report["message"] == "Diagnostics are not enabled":
+            raise HTTPException(
+                status_code=403,
+                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+            )
+        return report
+    except Exception as e:
+        logger.error(f"Error generating zero count diagnostics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/diagnostics/health")
+async def get_building_health():
+    """
+    Get health monitoring alerts for buildings.
+    Only works when ENABLE_DIAGNOSTICS=true.
+    """
+    try:
+        alerts = monitor_building_health(wireless_db, apclient_db, auth_manager)
+        if not is_diagnostics_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+            )
+        return {"alerts": alerts}
+    except Exception as e:
+        logger.error(f"Error generating health alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/diagnostics/report")
+async def get_diagnostic_report():
+    """
+    Get a comprehensive diagnostic report including zero count analysis and health monitoring.
+    Only works when ENABLE_DIAGNOSTICS=true.
+    """
+    try:
+        report = generate_diagnostic_report(wireless_db, apclient_db, auth_manager)
+        if "message" in report and report["message"] == "Diagnostics are not enabled":
+            raise HTTPException(
+                status_code=403,
+                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+            )
+        return report
+    except Exception as e:
+        logger.error(f"Error generating diagnostic report: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

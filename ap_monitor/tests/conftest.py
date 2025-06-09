@@ -17,10 +17,6 @@ from ap_monitor.app.models import (
     WirelessBase, APClientBase
 )
 from ap_monitor.app.db import (
-    wireless_engine,
-    apclient_engine,
-    WirelessSessionLocal,
-    APClientSessionLocal,
     get_wireless_db,
     get_apclient_db
 )
@@ -29,17 +25,18 @@ from ap_monitor.app.main import app
 # Set TESTING environment variable
 os.environ["TESTING"] = "true"
 
-# Create a shared in-memory SQLite database for testing
-TEST_DB_URL = "sqlite:///:memory:"
+# Use two separate in-memory SQLite databases for wireless and apclient schemas
+WIRELESS_TEST_DB_URL = "sqlite:///:memory:"
+APCLIENT_TEST_DB_URL = "sqlite:///:memory:"
 
 # Create engines with StaticPool to ensure same connection across threads
 wireless_engine = create_engine(
-    TEST_DB_URL,
+    WIRELESS_TEST_DB_URL,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool
 )
 apclient_engine = create_engine(
-    TEST_DB_URL,
+    APCLIENT_TEST_DB_URL,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool
 )
@@ -47,6 +44,12 @@ apclient_engine = create_engine(
 # Create session factories
 WirelessSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=wireless_engine)
 APClientSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine)
+
+# Monkeypatch the app's db.py to use the test engines and session factories
+ap_monitor.app.db.wireless_engine = wireless_engine
+ap_monitor.app.db.apclient_engine = apclient_engine
+ap_monitor.app.db.WirelessSessionLocal = WirelessSessionLocal
+ap_monitor.app.db.APClientSessionLocal = APClientSessionLocal
 
 # Enable foreign key support for SQLite
 @event.listens_for(Engine, "connect")
@@ -56,21 +59,30 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.close()
 
 # --- Create tables for both databases ---
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def create_test_db():
+    # Import wireless models before creating wireless tables
+    from ap_monitor.app.models import Building, Campus, ClientCount, WirelessBase
     WirelessBase.metadata.drop_all(bind=wireless_engine)
-    APClientBase.metadata.drop_all(bind=apclient_engine)
-    
     WirelessBase.metadata.create_all(bind=wireless_engine)
+
+    # Import apclient models before creating apclient tables
+    from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType, APClientBase
+    APClientBase.metadata.drop_all(bind=apclient_engine)
     APClientBase.metadata.create_all(bind=apclient_engine)
     
-    # Debug: Check tables
+    # Verify tables are created correctly
     inspector = inspect(apclient_engine)
     tables = inspector.get_table_names()
     print(f"Tables in apclient_engine: {tables}")
-    assert 'clientcount' in tables, "clientcount table not created"
-    assert 'accesspoints' in tables, "accesspoints table not created"
     
+    # Verify table schemas
+    for table_name in ['buildings', 'floors', 'rooms', 'accesspoints', 'clientcount', 'radiotypes']:
+        assert table_name in tables, f"{table_name} table not created"
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        print(f"Columns in {table_name}: {columns}")
+    
+    # Add default radio types
     with APClientSessionLocal() as session:
         if not session.query(RadioType).first():
             session.add_all([

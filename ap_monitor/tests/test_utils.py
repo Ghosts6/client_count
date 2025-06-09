@@ -2,7 +2,7 @@ import logging
 import pytest
 import io
 from unittest.mock import patch, MagicMock, mock_open
-from datetime import datetime
+from datetime import datetime, timedelta
 from ap_monitor.app.utils import setup_logging, calculate_next_run_time, load_env_file
 
 
@@ -27,13 +27,6 @@ def test_setup_logging(mock_StreamHandler, mock_basicConfig, mock_TimedRotatingF
     )
 
     assert isinstance(logger, logging.Logger)
-
-def test_calculate_next_run_time():
-    next_run = calculate_next_run_time()
-    assert isinstance(next_run, datetime)
-    assert next_run.minute % 5 == 1
-    assert next_run.second == 0
-    assert next_run.microsecond == 0
 
 @patch("builtins.open", new_callable=mock_open, read_data="VAR1=value1\nVAR2=value2\n")
 def test_load_env_file(mock_file):

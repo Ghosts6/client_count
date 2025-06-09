@@ -2,6 +2,9 @@ import logging
 import os
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+TORONTO_TZ = ZoneInfo("America/Toronto")
 
 def setup_logging():
     """Configure logging for the application."""
@@ -25,28 +28,12 @@ def setup_logging():
 
 def calculate_next_run_time():
     """
-    Calculate the next 5-minute interval plus 1 minute for scheduled tasks.
-    This matches the logic in the original code that sets specific intervals.
+    Calculate the next run time as exactly 5 minutes from now.
+    This ensures consistent 5-minute intervals between task runs.
     """
-    now = datetime.now()
-    current_minute = now.minute
-    
-    # Calculate the next 5x + 1 minute interval
-    next_minute = (current_minute // 5 + 1) * 5 + 1
-    
-    if next_minute >= 60:
-        next_minute = 1  # Reset to 1 (not 0, to keep the +1 pattern)
-        next_hour = (now.hour + 1) % 24
-    else:
-        next_hour = now.hour
-        
-    next_run = now.replace(hour=next_hour, minute=next_minute, second=0, microsecond=0)
-    
-    # If next_run is in the past (due to calculations), add 5 minutes
-    if next_run <= now:
-        next_run = next_run + timedelta(minutes=5)
-        
-    return next_run
+    now = datetime.now(TORONTO_TZ)
+    next_run = now + timedelta(minutes=5)
+    return next_run.replace(second=0, microsecond=0)
 
 def load_env_file(file_path=".env"):
     """

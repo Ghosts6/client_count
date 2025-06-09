@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from fastapi.testclient import TestClient
 from ap_monitor.app.db import get_wireless_db, get_apclient_db
-from ap_monitor.app.main import app, update_ap_data_task, update_client_count_task
+from ap_monitor.app.main import app, update_ap_data_task, update_client_count_task, TORONTO_TZ
 from ap_monitor.app.models import (
     AccessPoint, ClientCount, Building, Floor, Campus, ApBuilding, Room, RadioType, ClientCountAP
 )
@@ -27,6 +27,7 @@ from ap_monitor.app.main import (
     calculate_next_run_time,
     health_check
 )
+from apscheduler.triggers.cron import CronTrigger
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -567,21 +568,121 @@ def test_health_check_unhealthy(mock_scheduler):
         assert "error" in response
         assert "Scheduler Error" in response["error"]
 
+def test_scheduler_configuration():
+    """Test that scheduler is configured correctly with 5-minute intervals."""
+    # Create scheduler
+    scheduler = BackgroundScheduler(timezone=timezone.utc)
+    
+    try:
+        # Add test jobs
+        scheduler.add_job(
+            lambda: None,
+            'cron',
+            minute='*/5',
+            second=0,
+            id='test_job'
+        )
+        
+        # Start the scheduler
+        scheduler.start()
+        
+        # Get job
+        job = scheduler.get_job('test_job')
+        
+        # Verify job configuration
+        assert isinstance(job.trigger, CronTrigger)
+        
+        # Calculate next run time
+        now = datetime.now(timezone.utc)
+        next_run = job.next_run_time
+        
+        # Verify next run is at next 5-minute mark
+        assert next_run.minute % 5 == 0
+        assert next_run.second == 0
+        assert next_run.microsecond == 0
+        
+        # Verify next run is in the future
+        assert next_run > now
+        
+        # Verify time difference is less than 5 minutes
+        time_diff = next_run - now
+        assert timedelta(0) <= time_diff <= timedelta(minutes=5)
+        
+        # Calculate next few run times to verify 5-minute intervals
+        next_runs = []
+        current_time = next_run
+        for _ in range(3):
+            current_time = job.trigger.get_next_fire_time(current_time, current_time)
+            if current_time:
+                next_runs.append(current_time)
+        
+        # Verify intervals between runs are 5 minutes
+        for i in range(len(next_runs) - 1):
+            interval = next_runs[i + 1] - next_runs[i]
+            assert interval == timedelta(minutes=5)
+            
+    finally:
+        # Clean up
+        scheduler.shutdown()
+
 def test_calculate_next_run_time():
     """Test next run time calculation."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(TORONTO_TZ)
     next_run = calculate_next_run_time()
     
     # Next run should be in the future
     assert next_run > now
     
-    # Next run should be within 5 minutes
-    assert next_run - now <= timedelta(minutes=5)
+    # Next run should be approximately 4 to 5 minutes from now (allowing for execution time and rounding)
+    time_diff = next_run - now
+    assert timedelta(minutes=4) <= time_diff <= timedelta(minutes=5)
     
-    # Next run should be on a 5-minute boundary
-    assert next_run.minute % 5 == 0
+    # Next run should have zero seconds and microseconds
     assert next_run.second == 0
     assert next_run.microsecond == 0
+
+def test_task_rescheduling():
+    """Test that tasks are rescheduled 5 minutes after completion."""
+    # Create scheduler
+    scheduler = BackgroundScheduler(timezone=timezone.utc)
+    
+    try:
+        # Add test job
+        scheduler.add_job(
+            lambda: None,
+            'interval',
+            minutes=5,
+            id='test_job'
+        )
+        
+        # Start the scheduler
+        scheduler.start()
+        
+        # Get job
+        job = scheduler.get_job('test_job')
+        
+        # Simulate task completion and rescheduling
+        now = datetime.now(timezone.utc)
+        
+        # Reschedule the job with a new trigger
+        scheduler.reschedule_job(
+            'test_job',
+            trigger='interval',
+            minutes=5
+        )
+        
+        # Get updated job
+        job = scheduler.get_job('test_job')
+        
+        # Verify interval
+        assert job.trigger.interval == timedelta(minutes=5)
+        
+        # Verify next run is approximately 5 minutes from now
+        time_diff = job.next_run_time - now
+        assert timedelta(minutes=4, seconds=55) <= time_diff <= timedelta(minutes=5, seconds=5)
+        
+    finally:
+        scheduler.shutdown()
 
 def test_wireless_count_db_creation(wireless_db):
     """Test that wireless_count database tables are created correctly."""

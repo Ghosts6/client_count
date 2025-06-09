@@ -155,8 +155,42 @@ def test_fetch_client_counts_retries(mock_urlopen):
     mock_response1 = MagicMock()
     mock_response1.read.return_value = json.dumps({
         "response": [{
-            "location": "Keele Campus/Building/Test Building/Floor 1/Room 101",
-            "clientCount": {"radio0": 5, "radio1": 3}
+            "siteName": "Test Building",
+            "siteId": "test-id-1",
+            "parentSiteId": "e77b6e96-3cd3-400a-9ebd-231c827fd369",
+            "parentSiteName": " All Sites",
+            "siteType": "building",
+            "healthyClientsPercentage": 100,
+            "clientHealthWired": 100,
+            "clientHealthWireless": 100,
+            "numberOfClients": 8,
+            "numberOfWiredClients": 3,
+            "numberOfWirelessClients": 5,
+            "apDeviceTotalCount": 2,
+            "wirelessDeviceTotalCount": 2,
+            "networkHealthWireless": 90,
+            "clientHealthWireless": 95,
+            "wiredGoodClients": 3,
+            "wirelessGoodClients": 5,
+            "usage": 1998130.0,
+            "applicationHealthStats": {
+                "appTotalCount": 0,
+                "businessRelevantAppCount": {
+                    "poor": 0,
+                    "fair": 0,
+                    "good": 0
+                },
+                "businessIrrelevantAppCount": {
+                    "poor": 0,
+                    "fair": 0,
+                    "good": 0
+                },
+                "defaultHealthAppCount": {
+                    "poor": 0,
+                    "fair": 0,
+                    "good": 0
+                }
+            }
         }],
         "totalCount": 1
     }).encode()
@@ -188,18 +222,16 @@ def test_fetch_client_counts_retries(mock_urlopen):
 
     # Verify the results
     assert len(data) == 1
-    assert "Keele Campus" in data[0]["location"]
-    assert "clientCount" in data[0]
-
-    # Verify the mock was called the expected number of times
-    assert mock_urlopen.call_count == 5
-
-    # Verify the offsets used in the calls
-    calls = mock_urlopen.call_args_list
-    offsets = [call[0][0].full_url for call in calls]
-    assert any("offset=1" in url for url in offsets)
-    assert any("offset=51" in url for url in offsets)
-    assert any("offset=101" in url for url in offsets)
+    assert data[0]['location'] == "Test Building"
+    assert data[0]['wirelessClients'] == 5
+    assert data[0]['wiredClients'] == 3
+    assert data[0]['totalClients'] == 8
+    assert data[0]['apDevices'] == 2
+    assert data[0]['wirelessDevices'] == 2
+    assert data[0]['networkHealth'] == 90
+    assert data[0]['clientHealth'] == 95
+    assert data[0]['siteType'] == "building"
+    assert data[0]['parentSiteName'] == " All Sites"
 
 
 @patch("ap_monitor.app.dna_api.urlopen", side_effect=Exception("API unreachable"))

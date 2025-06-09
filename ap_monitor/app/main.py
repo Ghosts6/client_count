@@ -439,6 +439,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             
             building_name, floor_name = parse_location(location)
             if not building_name or not floor_name:
+                logger.warning(f"Skipping AP {ap_name} due to invalid location: {location}")
                 continue
             
             # Building - Use apclient_db (db) for ApBuilding model
@@ -525,6 +526,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                     time_inserted=now
                 )
                 wireless_db.add(client_count)
+                logger.info(f"Updated client count for building {building_name}: {total_clients}")
             else:
                 logger.warning(f"Building {building_name} not found in wireless_count database")
         
@@ -1025,33 +1027,96 @@ def health_check():
         }
 
 def calculate_next_run_time():
-    """Calculate the next run time rounded up to the next 5-minute mark (Toronto local time, offset-aware)."""
+    """Calculate the next run time for scheduled tasks."""
     now = datetime.now(TORONTO_TZ)
-    minute = (now.minute // 5 + 1) * 5
-    if minute >= 60:
-        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        return next_hour
-    else:
-        return now.replace(minute=minute, second=0, microsecond=0)
+    # Add 5 minutes to current time
+    next_run = now + timedelta(minutes=5)
+    next_run = next_run.replace(second=0, microsecond=0)
+    return next_run
 
 @app.get("/diagnostics/zero-counts")
 async def get_zero_count_diagnostics():
-    """
-    Get detailed analysis of buildings with zero client counts.
-    Only works when ENABLE_DIAGNOSTICS=true.
-    """
+    """Get diagnostics for buildings with zero client counts."""
     try:
-        with get_wireless_db() as wireless_db, get_apclient_db() as apclient_db:
-            report = analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager)
-            if "message" in report and report["message"] == "Diagnostics are not enabled":
-                raise HTTPException(
-                    status_code=403,
-                    detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
-                )
-            return report
+        with get_wireless_db() as db:
+            # Get current timestamp
+            current_time = datetime.now(TORONTO_TZ)
+            
+            # Get all buildings
+            buildings = db.query(Building).all()
+            
+            zero_count_buildings = []
+            
+            for building in buildings:
+                # Get latest client count
+                latest_count = db.query(ClientCount)\
+                    .filter(ClientCount.building_id == building.building_id)\
+                    .order_by(ClientCount.time_inserted.desc())\
+                    .first()
+                
+                if not latest_count:
+                    continue
+                    
+                # Get historical average (last 24 hours)
+                one_day_ago = current_time - timedelta(days=1)
+                historical_counts = db.query(ClientCount)\
+                    .filter(
+                        ClientCount.building_id == building.building_id,
+                        ClientCount.time_inserted >= one_day_ago
+                    ).all()
+                
+                if not historical_counts:
+                    continue
+                    
+                historical_avg = sum(count.client_count for count in historical_counts) / len(historical_counts)
+                
+                # If current count is 0 but historical average is significant
+                if latest_count.client_count == 0 and historical_avg > 5:
+                    # Get AP status
+                    ap_status = {
+                        'total_aps': len(building.access_points),
+                        'active_aps': sum(1 for ap in building.access_points if ap.status == 'active'),
+                        'inactive_aps': sum(1 for ap in building.access_points if ap.status == 'inactive')
+                    }
+                    
+                    # Get DNA Center status
+                    dna_status = {
+                        'total_aps_in_dna': len(building.access_points),
+                        'aps_with_clients': sum(1 for ap in building.access_points if ap.client_count > 0)
+                    }
+                    
+                    # Determine severity
+                    if historical_avg > 50:
+                        severity = 'high'
+                    elif historical_avg > 20:
+                        severity = 'medium'
+                    else:
+                        severity = 'low'
+                    
+                    zero_count_buildings.append({
+                        'building_name': building.building_name,
+                        'campus_name': building.campus.campus_name if building.campus else 'Unknown',
+                        'current_count': latest_count.client_count,
+                        'historical_average': round(historical_avg, 2),
+                        'severity': severity,
+                        'ap_status': ap_status,
+                        'dna_center_status': dna_status,
+                        'last_updated': latest_count.time_inserted.isoformat()
+                    })
+            
+            return {
+                'timestamp': current_time.isoformat(),
+                'total_buildings_analyzed': len(buildings),
+                'buildings_with_zero_counts': len(zero_count_buildings),
+                'zero_count_buildings': zero_count_buildings
+            }
+            
     except Exception as e:
-        logger.error(f"Error generating zero count diagnostics: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in get_zero_count_diagnostics: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving zero count diagnostics: {str(e)}"
+        )
 
 @app.get("/diagnostics/health")
 async def get_building_health():
@@ -1090,3 +1155,56 @@ async def get_diagnostic_report():
     except Exception as e:
         logger.error(f"Error generating diagnostic report: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize application on startup."""
+    logger.info("App starting up...")
+    
+    # Initialize database
+    logger.info("Initializing database...")
+    initialize_database()
+    
+    # Initialize scheduler
+    logger.info("Initializing scheduler...")
+    scheduler = BackgroundScheduler(timezone=TORONTO_TZ)
+    
+    # Calculate next run time
+    next_run_time = calculate_next_run_time()
+    logger.info(f"First scheduled run at: {next_run_time} (Server time: {datetime.now(TORONTO_TZ)})")
+    
+    # Add jobs with proper intervals
+    scheduler.add_job(
+        update_ap_data_task,
+        'interval',
+        minutes=5,
+        next_run_time=next_run_time,
+        id='update_ap_data_task',
+        replace_existing=True,
+        coalesce=True  # Only run once if multiple executions are missed
+    )
+    
+    scheduler.add_job(
+        update_client_count_task,
+        'interval',
+        minutes=5,
+        next_run_time=next_run_time,
+        id='update_client_count_task',
+        replace_existing=True,
+        coalesce=True  # Only run once if multiple executions are missed
+    )
+    
+    # Start the scheduler
+    scheduler.start()
+    logger.info("Scheduler started successfully")
+    
+    # Store scheduler in app state
+    app.state.scheduler = scheduler
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on application shutdown"""
+    logger.info("App shutting down...")
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("Scheduler shut down successfully")

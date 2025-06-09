@@ -120,12 +120,11 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
     auth_headers = {'x-auth-token': token}
     data = []
     
-    # Use the device-health endpoint instead of site-health
-    base_url = f"{BASE_URL}/dna/intent/api/v1/device-health"
+    # Use the site-health endpoint to get location information
+    base_url = f"{BASE_URL}/dna/intent/api/v1/site-health"
     
     for i in range(3):  # Fetch data in batches with different offsets
         params = {
-            "deviceRole": "AP",
             "siteId": KEELE_CAMPUS_SITE_ID,
             "limit": 50,
             "offset": i * 50 + 1
@@ -142,8 +141,70 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
                 with urlopen(req, context=ssl_context, timeout=60) as response:
                     response_data = json.load(response)
                     logger.info(f"API request {i + 1} completed successfully")
-                    data.extend(response_data.get('response', []))
+                    
+                    # Log the raw response for debugging
+                    logger.info(f"Raw API Response for request {i + 1}: {json.dumps(response_data, indent=2)}")
+                    
+                    if 'response' not in response_data:
+                        logger.error(f"Missing 'response' in API response: {response_data}")
+                        raise KeyError("Missing 'response' in API response")
+                    
+                    # Process the site data
+                    for site in response_data.get('response', []):
+                        # Get the site name/location with null check
+                        site_name = site.get('siteName', '')
+                        if not site_name:
+                            logger.warning(f"Skipping site with empty name: {site}")
+                            continue
+                            
+                        # Get client counts from the correct fields
+                        wireless_clients = site.get('numberOfWirelessClients', 0) or 0
+                        wired_clients = site.get('numberOfWiredClients', 0) or 0
+                        total_clients = site.get('numberOfClients', 0) or 0
+                        
+                        # Get device counts
+                        ap_devices = site.get('apDeviceTotalCount', 0) or 0
+                        wireless_devices = site.get('wirelessDeviceTotalCount', 0) or 0
+                        
+                        # Get health metrics
+                        network_health = site.get('networkHealthWireless', 0) or 0
+                        client_health = site.get('clientHealthWireless', 0) or 0
+                        
+                        # Get site hierarchy info with null checks
+                        site_type = site.get('siteType', '')
+                        parent_site = site.get('parentSiteName', '')
+                        
+                        # Create a site record with all available data
+                        processed_site = {
+                            'location': site_name,
+                            'clientCount': wireless_clients,  # Use wireless clients as the primary count
+                            'timestamp': rounded_unix_timestamp,
+                            'wiredClients': wired_clients,
+                            'wirelessClients': wireless_clients,
+                            'totalClients': total_clients,
+                            'apDevices': ap_devices,
+                            'wirelessDevices': wireless_devices,
+                            'networkHealth': network_health,
+                            'clientHealth': client_health,
+                            'siteType': site_type,
+                            'parentSiteName': parent_site
+                        }
+                        data.append(processed_site)
                 break
+            except HTTPError as e:
+                if e.code == 429:  # Too Many Requests
+                    attempt += 1
+                    if attempt >= retries:
+                        logger.error(f"Failed after {retries} attempts due to rate limiting")
+                        raise
+                    
+                    delay = 60 * (2 ** (attempt - 1))  # Start with 60 seconds, then 120, 240
+                    logger.warning(f"Rate limit hit. Waiting {delay} seconds before retry... (Attempt {attempt}/{retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"HTTP Error: {e}")
+                    raise
             except Exception as e:
                 attempt += 1
                 logger.warning(f"API request error (attempt {attempt}): {e}")
@@ -151,8 +212,32 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
                     logger.error(f"Failed after {retries} attempts: {e}")
                 time.sleep(2 ** attempt)  # Exponential backoff
     
-    # Filter for Keele Campus buildings
-    return [site for site in data if "Keele Campus" in site.get('location', '')]
+    # More flexible location filtering and hierarchy handling
+    filtered_data = []
+    for site in data:
+        # Get values with null checks and default to empty string
+        location = str(site.get('location', '')).lower()
+        parent_site = str(site.get('parentSiteName', '')).lower()
+        site_type = str(site.get('siteType', '')).lower()
+        
+        # Include sites that:
+        # 1. Are buildings (site_type == 'building')
+        # 2. Have 'keele', 'york', or 'campus' in their name
+        # 3. Are part of the main campus (parent site contains 'all sites')
+        # 4. Have actual client counts (wireless or wired)
+        if ((site_type == 'building' or 
+             any(keyword in location for keyword in ['keele', 'york', 'campus']) or
+             'all sites' in parent_site) and
+            (site.get('wirelessClients', 0) > 0 or site.get('wiredClients', 0) > 0)):
+            filtered_data.append(site)
+    
+    logger.info(f"Retrieved {len(filtered_data)} buildings with client count data")
+    if len(filtered_data) == 0:
+        logger.warning("No buildings found with client count data. Raw data sample:")
+        for site in data[:3]:  # Log first 3 items as sample
+            logger.warning(f"Sample site data: {json.dumps(site, indent=2)}")
+    
+    return filtered_data
 
 def test_api_connection():
     """Test the API connection and return detailed information about the response."""
@@ -205,8 +290,11 @@ def fetch_ap_data(auth_manager, timestamp=None):
     
     all_devices = []
     offset = 1
-    limit = 50  # Reduced from 100 to match fetch_client_counts
+    limit = 25  # Reduced from 50 to avoid rate limits
     total_count = None
+    retry_count = 0
+    max_retries = 3
+    base_delay = 30  # Start with 30 seconds delay
     
     while True:
         # Build request parameters
@@ -250,12 +338,20 @@ def fetch_ap_data(auth_manager, timestamp=None):
                     break
                 
                 offset += limit
-                time.sleep(3)  # 3 seconds between requests = 20 requests per minute
+                # Add delay between requests to avoid rate limits
+                time.sleep(5)  # 5 seconds between requests
+                retry_count = 0  # Reset retry count on successful request
                 
         except HTTPError as e:
             if e.code == 429:  # Too Many Requests
-                logger.warning("Rate limit hit. Waiting 60 seconds before retry...")
-                time.sleep(60)  # Wait a full minute before retrying
+                retry_count += 1
+                if retry_count > max_retries:
+                    logger.error(f"Failed after {max_retries} retries due to rate limiting")
+                    raise
+                
+                delay = base_delay * (2 ** (retry_count - 1))  # Exponential backoff
+                logger.warning(f"Rate limit hit. Waiting {delay} seconds before retry... (Attempt {retry_count}/{max_retries})")
+                time.sleep(delay)
                 continue
             else:
                 logger.error(f"HTTP Error: {e}")

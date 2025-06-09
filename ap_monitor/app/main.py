@@ -13,7 +13,15 @@ from sqlalchemy.ext.declarative import declarative_base
 import os
 from zoneinfo import ZoneInfo  # Python 3.9+
 
-from ap_monitor.app.db import get_wireless_db, get_apclient_db, init_db, WirelessBase, APClientBase
+from ap_monitor.app.db import (
+    get_wireless_db,
+    get_apclient_db,
+    get_wireless_db_session,
+    get_apclient_db_session,
+    init_db,
+    WirelessBase,
+    APClientBase
+)
 from ap_monitor.app.models import (
     Campus, Building, ClientCount,
     ApBuilding, Floor, Room, AccessPoint, RadioType, ClientCountAP
@@ -153,7 +161,7 @@ async def lifespan(app: FastAPI):
         logger.info("Database initialized successfully")
 
         # Initialize radio table if empty
-        with next(get_wireless_db()) as db:
+        with get_wireless_db() as db:
             if db.query(RadioType).count() == 0:
                 logger.info("Initializing radio data...")
                 radios = [
@@ -194,12 +202,19 @@ async def lifespan(app: FastAPI):
 
         yield
 
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+        raise
     finally:
         # === SHUTDOWN ===
         logger.info("App shutting down...")
-        logger.info("Shutting down scheduler...")
-        scheduler.shutdown()
-        logger.info("Scheduler shut down successfully")
+        try:
+            if scheduler.running:
+                logger.info("Shutting down scheduler...")
+                scheduler.shutdown()
+                logger.info("Scheduler shut down successfully")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
 
 # Create FastAPI application with lifespan handler
 app = FastAPI(
@@ -274,7 +289,7 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
     fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
     if db is None:
-        db = next(get_apclient_db())  # Use apclient_db instead of wireless_db
+        db = get_apclient_db_session()  # Use session function instead of context manager
         close_db = True
     try:
         logger.info("Running scheduled task: update_ap_data_task")
@@ -384,15 +399,18 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
     try:
         # Get database sessions if not provided
         if db is None:
-            db = next(get_apclient_db())
+            db = get_apclient_db_session()
             close_db = True
         if wireless_db is None:
-            wireless_db = next(get_wireless_db())
+            wireless_db = get_wireless_db_session()
             close_wireless_db = True
         
         # Get current time for timestamps
         now = datetime.now(timezone.utc)
         rounded_unix_timestamp = int(now.timestamp())
+        
+        # Use provided auth_manager or default
+        auth_manager_obj = auth_manager_obj or auth_manager
         
         # Dual-path logic for fetching AP/client count data
         if fetch_client_counts_func:
@@ -528,14 +546,16 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         logger.info("Client count data updated successfully in both databases")
 
     except Exception as e:
-        db.rollback()
-        wireless_db.rollback()
-        logger.error(f"Error updating client count data: {e}")
+        if db:
+            db.rollback()
+        if wireless_db:
+            wireless_db.rollback()
+        logger.error(f"Error updating client count data: {str(e)}")
         raise  # Re-raise to trigger scheduler's error handling
     finally:
-        if close_db:
+        if close_db and db:
             db.close()
-        if close_wireless_db:
+        if close_wireless_db and wireless_db:
             wireless_db.close()
         next_run = calculate_next_run_time()
         reschedule_job("update_client_count_task", update_client_count_task, next_run)

@@ -1,35 +1,43 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from ap_monitor.app.db import get_wireless_db, get_apclient_db, init_db
+from ap_monitor.app.db import (
+    get_wireless_db,
+    get_apclient_db,
+    get_wireless_db_session,
+    get_apclient_db_session,
+    init_db
+)
 from sqlalchemy.exc import OperationalError
 
 def test_get_wireless_db_yields_and_closes():
     mock_session = MagicMock()
     
     with patch("ap_monitor.app.db.WirelessSessionLocal", return_value=mock_session):
-        gen = get_wireless_db()
-        db = next(gen)
-        assert db == mock_session
-        try:
-            next(gen)
-        except StopIteration:
-            pass
-        
+        with get_wireless_db() as db:
+            assert db == mock_session
         mock_session.close.assert_called_once()
 
 def test_get_apclient_db_yields_and_closes():
     mock_session = MagicMock()
     
     with patch("ap_monitor.app.db.APClientSessionLocal", return_value=mock_session):
-        gen = get_apclient_db()
-        db = next(gen)
-        assert db == mock_session
-        try:
-            next(gen)
-        except StopIteration:
-            pass
-        
+        with get_apclient_db() as db:
+            assert db == mock_session
         mock_session.close.assert_called_once()
+
+def test_get_wireless_db_session():
+    mock_session = MagicMock()
+    
+    with patch("ap_monitor.app.db.WirelessSessionLocal", return_value=mock_session):
+        db = get_wireless_db_session()
+        assert db == mock_session
+
+def test_get_apclient_db_session():
+    mock_session = MagicMock()
+    
+    with patch("ap_monitor.app.db.APClientSessionLocal", return_value=mock_session):
+        db = get_apclient_db_session()
+        assert db == mock_session
 
 @patch("ap_monitor.app.db.WirelessBase.metadata.create_all")
 @patch("ap_monitor.app.db.APClientBase.metadata.create_all")

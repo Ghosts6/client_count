@@ -151,17 +151,55 @@ def test_fetch_client_counts_retries(mock_urlopen):
     auth.token = "token"
     auth.token_expiry = datetime.now() + timedelta(minutes=10)
 
-    # Fail twice, succeed once
-    fail = MagicMock(side_effect=Exception("Temp failure"))
-    success = MagicMock()
-    success.__enter__.return_value.read.return_value = json.dumps({"response": [{"parentSiteName": "Keele Campus"}]}).encode()
-    success.__enter__.return_value.status = 200
+    # First page: fail twice, then succeed with one record
+    mock_response1 = MagicMock()
+    mock_response1.read.return_value = json.dumps({
+        "response": [{
+            "location": "Keele Campus/Building/Test Building/Floor 1/Room 101",
+            "clientCount": {"radio0": 5, "radio1": 3}
+        }],
+        "totalCount": 1
+    }).encode()
+    mock_response1.__enter__.return_value = mock_response1
+    mock_response1.status = 200
 
-    mock_urlopen.side_effect = [fail, fail, success]
+    # Subsequent pages: return empty response
+    mock_response_empty = MagicMock()
+    mock_response_empty.read.return_value = json.dumps({
+        "response": [],
+        "totalCount": 1
+    }).encode()
+    mock_response_empty.__enter__.return_value = mock_response_empty
+    mock_response_empty.status = 200
 
+    # Create mock error response
+    mock_error = MagicMock()
+    mock_error.side_effect = Exception("Temporary failure")
+
+    # Set up the mock to fail twice then succeed for first page, then empty for next pages
+    mock_urlopen.side_effect = [
+        mock_error, mock_error, mock_response1,  # First page
+        mock_response_empty,  # Second page (no more data)
+        mock_response_empty   # Third page (no more data)
+    ]
+
+    # Call the function
     data = fetch_client_counts(auth, rounded_unix_timestamp=1234567890, retries=3)
+
+    # Verify the results
     assert len(data) == 1
-    assert data[0]["parentSiteName"] == "Keele Campus"
+    assert "Keele Campus" in data[0]["location"]
+    assert "clientCount" in data[0]
+
+    # Verify the mock was called the expected number of times
+    assert mock_urlopen.call_count == 5
+
+    # Verify the offsets used in the calls
+    calls = mock_urlopen.call_args_list
+    offsets = [call[0][0].full_url for call in calls]
+    assert any("offset=1" in url for url in offsets)
+    assert any("offset=51" in url for url in offsets)
+    assert any("offset=101" in url for url in offsets)
 
 
 @patch("ap_monitor.app.dna_api.urlopen", side_effect=Exception("API unreachable"))

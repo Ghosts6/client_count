@@ -9,6 +9,7 @@ from ap_monitor.app.diagnostics import (
     is_diagnostics_enabled
 )
 from ap_monitor.app.models import Building, Campus, ClientCount, ApBuilding, AccessPoint
+from ap_monitor.app.db import get_wireless_db, get_apclient_db
 
 @pytest.fixture(autouse=True)
 def reset_environment():
@@ -253,4 +254,20 @@ def test_diagnostics_with_dna_center_error(mock_wireless_db, mock_apclient_db, m
         assert len(report["zero_count_buildings"]) == 1
         building_analysis = report["zero_count_buildings"][0]
         assert "Error checking DNA Center" in building_analysis["issues"][0]
-        assert "Verify DNA Center connectivity and credentials" in building_analysis["recommendations"] 
+        assert "Verify DNA Center connectivity and credentials" in building_analysis["recommendations"]
+
+def test_database_session_context_manager():
+    """Test that the database session context managers work correctly."""
+    with get_wireless_db() as wireless_db:
+        assert wireless_db is not None
+        # Perform a simple query to ensure the session is active
+        result = wireless_db.query(Building).first()
+        # If no records exist, the result will be None, but the session is still valid
+        assert wireless_db is not None
+
+    with get_apclient_db() as apclient_db:
+        assert apclient_db is not None
+        # Perform a simple query to ensure the session is active
+        result = apclient_db.query(ApBuilding).first()
+        # If no records exist, the result will be None, but the session is still valid
+        assert apclient_db is not None 

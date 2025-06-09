@@ -120,9 +120,20 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
     auth_headers = {'x-auth-token': token}
     data = []
     
+    # Use the device-health endpoint instead of site-health
+    base_url = f"{BASE_URL}/dna/intent/api/v1/device-health"
+    
     for i in range(3):  # Fetch data in batches with different offsets
-        params = f'?siteType=building&offset={i*50+1}&limit=50&timestamp={rounded_unix_timestamp}'
-        req = Request(SITE_HEALTH_URL + params, headers=auth_headers)
+        params = {
+            "deviceRole": "AP",
+            "siteId": KEELE_CAMPUS_SITE_ID,
+            "limit": 50,
+            "offset": i * 50 + 1
+        }
+        query_string = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{base_url}?{query_string}"
+        
+        req = Request(url, headers=auth_headers)
         attempt = 0
         
         while attempt < retries:
@@ -141,7 +152,7 @@ def fetch_client_counts(auth_manager, rounded_unix_timestamp, retries=3):
                 time.sleep(2 ** attempt)  # Exponential backoff
     
     # Filter for Keele Campus buildings
-    return [site for site in data if site.get('parentSiteName') == 'Keele Campus']
+    return [site for site in data if "Keele Campus" in site.get('location', '')]
 
 def test_api_connection():
     """Test the API connection and return detailed information about the response."""
@@ -194,14 +205,14 @@ def fetch_ap_data(auth_manager, timestamp=None):
     
     all_devices = []
     offset = 1
-    limit = 100  # Reduced from 250 to avoid rate limits
+    limit = 50  # Reduced from 100 to match fetch_client_counts
     total_count = None
     
     while True:
-        # Build request parameters without timestamps
+        # Build request parameters
         params = {
-            "deviceRole": "AP", 
-            "siteId": KEELE_CAMPUS_SITE_ID, 
+            "deviceRole": "AP",
+            "siteId": KEELE_CAMPUS_SITE_ID,
             "limit": limit,
             "offset": offset
         }

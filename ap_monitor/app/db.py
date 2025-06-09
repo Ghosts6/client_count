@@ -4,6 +4,7 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
+from contextlib import contextmanager
 
 # Load .env file
 load_dotenv()
@@ -75,6 +76,7 @@ except Exception as e:
     logger.error(f"Error connecting to the databases: {e}")
     raise
 
+@contextmanager
 def get_wireless_db():
     """Dependency for getting wireless_count DB session in FastAPI endpoints."""
     db = WirelessSessionLocal()
@@ -83,6 +85,7 @@ def get_wireless_db():
     finally:
         db.close()
 
+@contextmanager
 def get_apclient_db():
     """Dependency for getting apclientcount DB session in FastAPI endpoints."""
     db = APClientSessionLocal()
@@ -90,6 +93,14 @@ def get_apclient_db():
         yield db
     finally:
         db.close()
+
+def get_wireless_db_session():
+    """Get a wireless database session without context management."""
+    return WirelessSessionLocal()
+
+def get_apclient_db_session():
+    """Get an AP client database session without context management."""
+    return APClientSessionLocal()
 
 def init_db():
     """Initialize databases by creating tables."""
@@ -122,5 +133,7 @@ __all__ = [
     'APClientBase',
     'get_wireless_db',
     'get_apclient_db',
+    'get_wireless_db_session',
+    'get_apclient_db_session',
     'init_db'
 ]

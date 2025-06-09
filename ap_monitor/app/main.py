@@ -31,7 +31,12 @@ from ap_monitor.app.schemas import (
     RadioTypeCreate, RadioTypeResponse,
     ClientCountAPCreate, ClientCountAPResponse
 )
-from .diagnostics import generate_diagnostic_report, analyze_zero_count_buildings, monitor_building_health
+from .diagnostics import (
+    analyze_zero_count_buildings,
+    monitor_building_health,
+    generate_diagnostic_report,
+    is_diagnostics_enabled
+)
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
@@ -1016,13 +1021,14 @@ async def get_zero_count_diagnostics():
     Only works when ENABLE_DIAGNOSTICS=true.
     """
     try:
-        report = analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager)
-        if "message" in report and report["message"] == "Diagnostics are not enabled":
-            raise HTTPException(
-                status_code=403,
-                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
-            )
-        return report
+        with get_wireless_db() as wireless_db, get_apclient_db() as apclient_db:
+            report = analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager)
+            if "message" in report and report["message"] == "Diagnostics are not enabled":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+                )
+            return report
     except Exception as e:
         logger.error(f"Error generating zero count diagnostics: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1034,13 +1040,14 @@ async def get_building_health():
     Only works when ENABLE_DIAGNOSTICS=true.
     """
     try:
-        alerts = monitor_building_health(wireless_db, apclient_db, auth_manager)
-        if not is_diagnostics_enabled():
-            raise HTTPException(
-                status_code=403,
-                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
-            )
-        return {"alerts": alerts}
+        with get_wireless_db() as wireless_db, get_apclient_db() as apclient_db:
+            alerts = monitor_building_health(wireless_db, apclient_db, auth_manager)
+            if not is_diagnostics_enabled():
+                raise HTTPException(
+                    status_code=403,
+                    detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+                )
+            return {"alerts": alerts}
     except Exception as e:
         logger.error(f"Error generating health alerts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1052,13 +1059,14 @@ async def get_diagnostic_report():
     Only works when ENABLE_DIAGNOSTICS=true.
     """
     try:
-        report = generate_diagnostic_report(wireless_db, apclient_db, auth_manager)
-        if "message" in report and report["message"] == "Diagnostics are not enabled":
-            raise HTTPException(
-                status_code=403,
-                detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
-            )
-        return report
+        with get_wireless_db() as wireless_db, get_apclient_db() as apclient_db:
+            report = generate_diagnostic_report(wireless_db, apclient_db, auth_manager)
+            if "message" in report and report["message"] == "Diagnostics are not enabled":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable."
+                )
+            return report
     except Exception as e:
         logger.error(f"Error generating diagnostic report: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

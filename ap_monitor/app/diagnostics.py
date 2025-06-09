@@ -117,6 +117,7 @@ def analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager):
             building_analysis["issues"].append("Building not found in apclientcount database")
             building_analysis["recommendations"].append("Verify building name mapping between databases")
             report["potential_issues"].append(f"Mapping issue: {building.building_name}")
+            report["zero_count_buildings"].append(building_analysis)
             continue
 
         # Get AP counts and status

@@ -216,12 +216,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
 
-# Create FastAPI application with lifespan handler
+# Create FastAPI app with lifespan
 app = FastAPI(
-    title="AP Monitor",
-    description="API for monitoring wireless access points and client counts",
+    title="AP Monitor API",
+    description="API for monitoring wireless Access Points and client counts",
     version="1.0.0",
-    lifespan=lifespan,
+    lifespan=lifespan
 )
 
 def parse_location(location: str) -> tuple:
@@ -400,10 +400,10 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         # Get database sessions if not provided
         if db is None:
             db = get_apclient_db_session()
-            close_db = True
+        close_db = True
         if wireless_db is None:
             wireless_db = get_wireless_db_session()
-            close_wireless_db = True
+        close_wireless_db = True
         
         # Get current time for timestamps
         now = datetime.now(timezone.utc)
@@ -711,27 +711,30 @@ def get_client_counts(
 ):
     """Get AP client count data from the apclientcount database."""
     try:
-        query = db.query(ClientCountAP).join(AccessPoint, ClientCountAP.apid == AccessPoint.apid).join(RadioType, ClientCountAP.radioid == RadioType.radioid)
-        if ap_id:
-            query = query.filter(ClientCountAP.apid == ap_id)
-        if radio_id:
-            query = query.filter(ClientCountAP.radioid == radio_id)
-        query = query.order_by(ClientCountAP.timestamp.desc()).limit(limit)
-        results = query.all()
-        return [{
-            "clientcount": cc.clientcount,
-            "apname": cc.accesspoint.apname if cc.accesspoint else None,
-            "radioname": cc.radio.radioname if cc.radio else None,
-            "apid": cc.apid,
-            "radioid": cc.radioid,
-            "timestamp": cc.timestamp.isoformat() if cc.timestamp else None
-        } for cc in results]
-    except SQLAlchemyError as e:
-        logger.error(f"Database error in /client-counts: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
+        with db.begin():
+            # Build query
+            query = db.query(ClientCountAP)
+            
+            # Apply filters
+            if ap_id is not None:
+                query = query.filter(ClientCountAP.apid == ap_id)
+            if radio_id is not None:
+                query = query.filter(ClientCountAP.radioid == radio_id)
+            
+            # Get results
+            results = query.order_by(ClientCountAP.timestamp.desc()).limit(limit).all()
+            
+            # Format response
+            return [{
+                "count_id": r.countid,
+                "ap_id": r.apid,
+                "radio_id": r.radioid,
+                "client_count": r.clientcount,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None
+            } for r in results]
     except Exception as e:
-        logger.error(f"Unexpected error in /client-counts: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Error in /client-counts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/buildings", response_model=List[dict], tags=["Buildings"])
 def get_buildings(db: Session = Depends(get_wireless_db)):

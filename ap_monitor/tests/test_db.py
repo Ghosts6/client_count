@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 
 def test_get_wireless_db_yields_and_closes():
     mock_session = MagicMock()
+    mock_session.__enter__.return_value = mock_session
     
     with patch("ap_monitor.app.db.WirelessSessionLocal", return_value=mock_session):
         with get_wireless_db() as db:
@@ -19,6 +20,7 @@ def test_get_wireless_db_yields_and_closes():
 
 def test_get_apclient_db_yields_and_closes():
     mock_session = MagicMock()
+    mock_session.__enter__.return_value = mock_session
     
     with patch("ap_monitor.app.db.APClientSessionLocal", return_value=mock_session):
         with get_apclient_db() as db:

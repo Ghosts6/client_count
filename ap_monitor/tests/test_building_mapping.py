@@ -242,7 +242,7 @@ def test_missing_building_handling(wireless_db, apclient_db, test_buildings):
 def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
     """Test that buildings with no APs get zero counts."""
     buildings, _ = test_buildings
-    
+
     # Add a building with no APs
     no_ap_building = Building(
         building_name="No AP Building",
@@ -252,17 +252,22 @@ def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
     )
     wireless_db.add(no_ap_building)
     wireless_db.commit()
-    
+
+    # Re-query the building to get a session-bound instance and extract the ID
+    fresh_building = wireless_db.query(Building).filter_by(building_name="No AP Building").first()
+    building_id = fresh_building.building_id
+
     with patch("ap_monitor.app.main.fetch_ap_data", return_value=[]), \
          patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
          patch("ap_monitor.app.main.auth_manager"):
-        
+
         # Run the update task
         update_client_count_task(wireless_db, apclient_db)
-        
-        # Verify zero count was created for the building with no APs
+
+        # Directly query for the zero count using the ID
         zero_count = wireless_db.query(ClientCount).filter_by(
-            building_id=no_ap_building.building_id
+            building_id=building_id
         ).first()
+
         assert zero_count is not None
         assert zero_count.client_count == 0 

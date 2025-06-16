@@ -595,3 +595,221 @@ def test_fetch_ap_data_missing_required_fields(mock_urlopen):
 
     data = fetch_ap_data(auth_manager)
     assert len(data) == 2  # Should still return both APs, let the processing layer handle missing fields
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_client_counts_with_site_details(mock_urlopen):
+    """Test fetch_client_counts with both site-health and site-detail endpoints."""
+    # Mock site details response
+    site_details_response = MagicMock()
+    site_details_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "id": "test-building-1",
+                "name": "Test Building 1",
+                "siteNameHierarchy": "Global/Keele Campus/Test Building 1",
+                "additionalInfo": [
+                    {
+                        "nameSpace": "Location",
+                        "attributes": {
+                            "type": "building",
+                            "latitude": "43.773578",
+                            "longitude": "-79.503704"
+                        }
+                    }
+                ]
+            }
+        ]
+    }).encode()
+    site_details_response.__enter__.return_value.status = 200
+
+    # Mock site health response
+    site_health_response = MagicMock()
+    site_health_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "siteId": "test-building-1",
+                "siteName": "Test Building 1",
+                "parentSiteName": "Keele Campus",
+                "siteType": "building",
+                "numberOfWirelessClients": 50,
+                "numberOfWiredClients": 30,
+                "numberOfClients": 80,
+                "apDeviceTotalCount": 10,
+                "wirelessDeviceTotalCount": 10,
+                "networkHealthWireless": 95,
+                "clientHealthWireless": 90
+            }
+        ]
+    }).encode()
+    site_health_response.__enter__.return_value.status = 200
+
+    # Set up mock to return different responses for different URLs
+    def mock_urlopen_side_effect(request, *args, **kwargs):
+        if "site/" in request.full_url:
+            return site_details_response
+        return site_health_response
+
+    mock_urlopen.side_effect = mock_urlopen_side_effect
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_client_counts(auth_manager, 1715000000000)
+
+    assert len(data) == 1
+    site = data[0]
+    assert site["location"] == "Test Building 1"
+    assert site["wirelessClients"] == 50
+    assert site["wiredClients"] == 30
+    assert site["totalClients"] == 80
+    assert site["apDevices"] == 10
+    assert site["wirelessDevices"] == 10
+    assert site["networkHealth"] == 95
+    assert site["clientHealth"] == 90
+    assert site["siteType"] == "building"
+    assert site["parentSiteName"] == "Keele Campus"
+    assert site["siteHierarchy"] == "Global/Keele Campus/Test Building 1"
+    assert site["latitude"] == "43.773578"
+    assert site["longitude"] == "-79.503704"
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_client_counts_site_details_failure(mock_urlopen):
+    """Test fetch_client_counts when site details endpoint fails."""
+    # Mock site details failure
+    site_details_error = HTTPError(
+        url="https://test.dnac.com/site/test",
+        code=500,
+        msg="Server Error",
+        hdrs={},
+        fp=None
+    )
+    
+    # Mock site health response
+    site_health_response = MagicMock()
+    site_health_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "siteId": "test-building-1",
+                "siteName": "Test Building 1",
+                "parentSiteName": "Keele Campus",
+                "siteType": "building",
+                "numberOfWirelessClients": 50,
+                "numberOfWiredClients": 30,
+                "numberOfClients": 80,
+                "apDeviceTotalCount": 10,
+                "wirelessDeviceTotalCount": 10,
+                "networkHealthWireless": 95,
+                "clientHealthWireless": 90
+            }
+        ]
+    }).encode()
+    site_health_response.__enter__.return_value.status = 200
+
+    # Set up mock to return different responses for different URLs
+    def mock_urlopen_side_effect(request, *args, **kwargs):
+        if "site/" in request.full_url:
+            raise site_details_error
+        return site_health_response
+
+    mock_urlopen.side_effect = mock_urlopen_side_effect
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    # Should still work with just site health data
+    data = fetch_client_counts(auth_manager, 1715000000000)
+
+    assert len(data) == 1
+    site = data[0]
+    assert site["location"] == "Test Building 1"
+    assert site["wirelessClients"] == 50
+    assert site["wiredClients"] == 30
+    assert site["totalClients"] == 80
+    # These fields should be empty since site details failed
+    assert site["siteHierarchy"] == ""
+    assert site["latitude"] is None
+    assert site["longitude"] is None
+
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_client_counts_filtering(mock_urlopen):
+    """Test fetch_client_counts filtering logic."""
+    # Mock site details response
+    site_details_response = MagicMock()
+    site_details_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "id": "test-building-1",
+                "name": "Test Building 1",
+                "siteNameHierarchy": "Global/Keele Campus/Test Building 1",
+                "additionalInfo": [
+                    {
+                        "nameSpace": "Location",
+                        "attributes": {
+                            "type": "building",
+                            "latitude": "43.773578",
+                            "longitude": "-79.503704"
+                        }
+                    }
+                ]
+            }
+        ]
+    }).encode()
+    site_details_response.__enter__.return_value.status = 200
+
+    # Mock site health response with multiple sites
+    site_health_response = MagicMock()
+    site_health_response.__enter__.return_value.read.return_value = json.dumps({
+        "response": [
+            {
+                "siteId": "test-building-1",
+                "siteName": "Test Building 1",
+                "parentSiteName": "Keele Campus",
+                "siteType": "building",
+                "numberOfWirelessClients": 50,
+                "numberOfWiredClients": 30,
+                "numberOfClients": 80,
+                "apDeviceTotalCount": 10,
+                "wirelessDeviceTotalCount": 10,
+                "networkHealthWireless": 95,
+                "clientHealthWireless": 90
+            },
+            {
+                "siteId": "test-area-1",
+                "siteName": "Test Area 1",
+                "parentSiteName": "Other Campus",
+                "siteType": "area",
+                "numberOfWirelessClients": 0,
+                "numberOfWiredClients": 0,
+                "numberOfClients": 0,
+                "apDeviceTotalCount": 0,
+                "wirelessDeviceTotalCount": 0,
+                "networkHealthWireless": 0,
+                "clientHealthWireless": 0
+            }
+        ]
+    }).encode()
+    site_health_response.__enter__.return_value.status = 200
+
+    # Set up mock to return different responses for different URLs
+    def mock_urlopen_side_effect(request, *args, **kwargs):
+        if "site/" in request.full_url:
+            return site_details_response
+        return site_health_response
+
+    mock_urlopen.side_effect = mock_urlopen_side_effect
+
+    auth_manager = MagicMock()
+    auth_manager.get_token.return_value = "mocked_token"
+
+    data = fetch_client_counts(auth_manager, 1715000000000)
+
+    # Should only include the building with clients
+    assert len(data) == 1
+    site = data[0]
+    assert site["location"] == "Test Building 1"
+    assert site["siteType"] == "building"
+    assert site["parentSiteName"] == "Keele Campus"
+    assert site["wirelessClients"] > 0 or site["wiredClients"] > 0

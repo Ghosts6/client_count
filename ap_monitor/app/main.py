@@ -702,38 +702,36 @@ def get_aps(db: Session = Depends(get_wireless_db)):
         logger.error(f"Unexpected error in /aps: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/client-counts", response_model=List[dict], tags=["Client Counts"])
+@app.get("/client-counts")
 def get_client_counts(
-    ap_id: Optional[int] = None,
-    radio_id: Optional[int] = None,
-    limit: int = 100,
+    building_id: Optional[int] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
     db: Session = Depends(get_apclient_db)
 ):
-    """Get AP client count data from the apclientcount database."""
+    """Get client count data with optional filters."""
     try:
-        with db.begin():
-            # Build query
-            query = db.query(ClientCountAP)
-            
-            # Apply filters
-            if ap_id is not None:
-                query = query.filter(ClientCountAP.apid == ap_id)
-            if radio_id is not None:
-                query = query.filter(ClientCountAP.radioid == radio_id)
-            
-            # Get results
-            results = query.order_by(ClientCountAP.timestamp.desc()).limit(limit).all()
-            
-            # Format response
-            return [{
-                "count_id": r.countid,
-                "ap_id": r.apid,
-                "radio_id": r.radioid,
-                "client_count": r.clientcount,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None
-            } for r in results]
+        query = db.query(ClientCount)
+        if building_id:
+            query = query.filter(ClientCount.building_id == building_id)
+        if start_time:
+            query = query.filter(ClientCount.time_inserted >= start_time)
+        if end_time:
+            query = query.filter(ClientCount.time_inserted <= end_time)
+        counts = query.all()
+        return [
+            {
+                "count_id": c.countid,
+                "apid": c.apid,
+                "radioid": c.radioid,
+                "client_count": c.clientcount,
+                "timestamp": c.timestamp.isoformat() if c.timestamp else None,
+                "building_id": c.building_id if hasattr(c, 'building_id') else None
+            }
+            for c in counts
+        ]
     except Exception as e:
-        logger.error(f"Error in /client-counts: {e}")
+        logger.error(f"Error in /client-counts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/buildings", response_model=List[dict], tags=["Buildings"])

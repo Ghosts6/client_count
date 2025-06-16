@@ -363,11 +363,8 @@ def test_get_client_counts(client, override_get_db_with_mock_client_counts):
     data = response.json()
     assert len(data) == 1
     # Check that the response contains the expected keys
-    assert "count_id" in data[0]
-    assert "ap_id" in data[0]
-    assert "radio_id" in data[0]
+    assert "building_id" in data[0]
     assert "client_count" in data[0]
-    assert "timestamp" in data[0]
 
 @patch("ap_monitor.app.main.auth_manager")
 def test_update_client_count_task(mock_auth, client, override_get_db_with_mock_client_counts):

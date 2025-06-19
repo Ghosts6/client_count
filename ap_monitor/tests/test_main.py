@@ -291,7 +291,7 @@ def test_get_buildings(client, override_get_db_with_mock_buildings):
 
 @pytest.fixture
 def override_get_db_with_mock_client_counts():
-    """Mock fixture for client counts endpoint."""
+    """Mock fixture for AP client counts endpoint (ClientCountAP model)."""
     # Create mock objects
     mock_ap = MagicMock()
     mock_ap.apname = "k372-ross-5-28"
@@ -302,12 +302,14 @@ def override_get_db_with_mock_client_counts():
     mock_radio.radioid = 1
 
     mock_cc = MagicMock()
+    mock_cc.countid = 1
     mock_cc.clientcount = 15
     mock_cc.apid = 1
     mock_cc.radioid = 1
     mock_cc.timestamp = datetime.now(timezone.utc)
     mock_cc.accesspoint = mock_ap
     mock_cc.radio = mock_radio
+    # No building_id for ClientCountAP
 
     # Set up the query chain
     mock_query = MagicMock()
@@ -324,7 +326,8 @@ def override_get_db_with_mock_client_counts():
         return mock_session
 
     app.dependency_overrides[get_wireless_db] = override
-    app.dependency_overrides[get_apclient_db] = override
+    from ap_monitor.app.db import get_apclient_db_dep
+    app.dependency_overrides[get_apclient_db_dep] = override
     yield
     app.dependency_overrides.clear()
 
@@ -357,14 +360,17 @@ def override_get_db_with_mock_aps():
     app.dependency_overrides.clear()
 
 def test_get_client_counts(client, override_get_db_with_mock_client_counts):
-    """Test getting client counts with mock data."""
+    """Test getting AP client counts with mock data (ClientCountAP model)."""
     response = client.get("/client-counts")
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
     # Check that the response contains the expected keys
-    assert "building_id" in data[0]
+    assert "apid" in data[0]
+    assert "radioid" in data[0]
     assert "client_count" in data[0]
+    assert "timestamp" in data[0]
+    assert "count_id" in data[0]
 
 @patch("ap_monitor.app.main.auth_manager")
 def test_update_client_count_task(mock_auth, client, override_get_db_with_mock_client_counts):
@@ -873,5 +879,49 @@ def test_wireless_count_multiple_updates(wireless_db, apclient_db):
 
             assert latest_count is not None
             assert latest_count.client_count == test_set["expected_total"]
+
+def test_get_client_counts_with_new_dep(client):
+    """Test /client-counts endpoint with the new FastAPI-compatible dependency."""
+    from ap_monitor.app.db import get_apclient_db_dep
+    # Prepare mock session and data
+    mock_ap = MagicMock()
+    mock_ap.apname = "k372-ross-5-28"
+    mock_ap.apid = 1
+
+    mock_radio = MagicMock()
+    mock_radio.radioname = "radio0"
+    mock_radio.radioid = 1
+
+    mock_cc = MagicMock()
+    mock_cc.countid = 1
+    mock_cc.clientcount = 15
+    mock_cc.apid = 1
+    mock_cc.radioid = 1
+    mock_cc.timestamp = datetime.now(timezone.utc)
+    mock_cc.accesspoint = mock_ap
+    mock_cc.radio = mock_radio
+    # No building_id for ClientCountAP
+
+    mock_query = MagicMock()
+    mock_query.filter.return_value = mock_query
+    mock_query.all.return_value = [mock_cc]
+
+    mock_session = MagicMock()
+    mock_session.query.return_value = mock_query
+
+    def override():
+        yield mock_session
+
+    app.dependency_overrides[get_apclient_db_dep] = override
+    response = client.get("/client-counts")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["client_count"] == 15
+    assert data[0]["count_id"] == 1
+    assert data[0]["apid"] == 1
+    assert data[0]["radioid"] == 1
+    assert "timestamp" in data[0]
+    app.dependency_overrides.clear()
 
 

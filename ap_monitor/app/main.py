@@ -20,7 +20,8 @@ from ap_monitor.app.db import (
     get_apclient_db_session,
     init_db,
     WirelessBase,
-    APClientBase
+    APClientBase,
+    get_apclient_db_dep
 )
 from ap_monitor.app.models import (
     Campus, Building, ClientCount,
@@ -704,20 +705,23 @@ def get_aps(db: Session = Depends(get_wireless_db)):
 
 @app.get("/client-counts")
 def get_client_counts(
-    building_id: Optional[int] = None,
+    ap_id: Optional[int] = None,
+    radio_id: Optional[int] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    db: Session = Depends(get_apclient_db)
+    db: Session = Depends(get_apclient_db_dep)
 ):
-    """Get client count data with optional filters."""
+    """Get AP client count data with optional filters (AP client DB)."""
     try:
-        query = db.query(ClientCount)
-        if building_id:
-            query = query.filter(ClientCount.building_id == building_id)
+        query = db.query(ClientCountAP)
+        if ap_id:
+            query = query.filter(ClientCountAP.apid == ap_id)
+        if radio_id:
+            query = query.filter(ClientCountAP.radioid == radio_id)
         if start_time:
-            query = query.filter(ClientCount.time_inserted >= start_time)
+            query = query.filter(ClientCountAP.timestamp >= start_time)
         if end_time:
-            query = query.filter(ClientCount.time_inserted <= end_time)
+            query = query.filter(ClientCountAP.timestamp <= end_time)
         counts = query.all()
         return [
             {
@@ -725,8 +729,7 @@ def get_client_counts(
                 "apid": c.apid,
                 "radioid": c.radioid,
                 "client_count": c.clientcount,
-                "timestamp": c.timestamp.isoformat() if c.timestamp else None,
-                "building_id": c.building_id if hasattr(c, 'building_id') else None
+                "timestamp": c.timestamp.isoformat() if c.timestamp else None
             }
             for c in counts
         ]
@@ -861,7 +864,7 @@ def get_wireless_client_counts(
     return query.all()
 
 @app.post("/ap/buildings/", response_model=ApBuildingResponse)
-def create_ap_building(building: ApBuildingCreate, db: Session = Depends(get_apclient_db)):
+def create_ap_building(building: ApBuildingCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new AP building."""
     db_building = ApBuilding(**building.dict())
     db.add(db_building)
@@ -870,12 +873,12 @@ def create_ap_building(building: ApBuildingCreate, db: Session = Depends(get_apc
     return db_building
 
 @app.get("/ap/buildings/", response_model=List[ApBuildingResponse])
-def get_ap_buildings(db: Session = Depends(get_apclient_db)):
+def get_ap_buildings(db: Session = Depends(get_apclient_db_dep)):
     """Get all AP buildings."""
     return db.query(ApBuilding).all()
 
 @app.post("/ap/floors/", response_model=FloorResponse)
-def create_floor(floor: FloorCreate, db: Session = Depends(get_apclient_db)):
+def create_floor(floor: FloorCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new floor."""
     db_floor = Floor(**floor.dict())
     db.add(db_floor)
@@ -884,7 +887,7 @@ def create_floor(floor: FloorCreate, db: Session = Depends(get_apclient_db)):
     return db_floor
 
 @app.get("/ap/floors/", response_model=List[FloorResponse])
-def get_ap_floors(building_id: Optional[int] = None, db: Session = Depends(get_apclient_db)):
+def get_ap_floors(building_id: Optional[int] = None, db: Session = Depends(get_apclient_db_dep)):
     """Get all floors, optionally filtered by building."""
     query = db.query(Floor)
     if building_id:
@@ -892,7 +895,7 @@ def get_ap_floors(building_id: Optional[int] = None, db: Session = Depends(get_a
     return query.all()
 
 @app.post("/ap/rooms/", response_model=RoomResponse)
-def create_room(room: RoomCreate, db: Session = Depends(get_apclient_db)):
+def create_room(room: RoomCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new room."""
     db_room = Room(**room.dict())
     db.add(db_room)
@@ -901,7 +904,7 @@ def create_room(room: RoomCreate, db: Session = Depends(get_apclient_db)):
     return db_room
 
 @app.get("/ap/rooms/", response_model=List[RoomResponse])
-def get_ap_rooms(floor_id: Optional[int] = None, db: Session = Depends(get_apclient_db)):
+def get_ap_rooms(floor_id: Optional[int] = None, db: Session = Depends(get_apclient_db_dep)):
     """Get all rooms, optionally filtered by floor."""
     query = db.query(Room)
     if floor_id:
@@ -909,7 +912,7 @@ def get_ap_rooms(floor_id: Optional[int] = None, db: Session = Depends(get_apcli
     return query.all()
 
 @app.post("/ap/access-points/", response_model=AccessPointResponse)
-def create_access_point(ap: AccessPointCreate, db: Session = Depends(get_apclient_db)):
+def create_access_point(ap: AccessPointCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new access point."""
     db_ap = AccessPoint(**ap.dict())
     db.add(db_ap)
@@ -922,7 +925,7 @@ def get_ap_access_points(
     building_id: Optional[int] = None,
     floor_id: Optional[int] = None,
     room_id: Optional[int] = None,
-    db: Session = Depends(get_apclient_db)
+    db: Session = Depends(get_apclient_db_dep)
 ):
     """Get all access points with optional filters."""
     query = db.query(AccessPoint)
@@ -935,7 +938,7 @@ def get_ap_access_points(
     return query.all()
 
 @app.post("/ap/radio-types/", response_model=RadioTypeResponse)
-def create_radio_type(radio: RadioTypeCreate, db: Session = Depends(get_apclient_db)):
+def create_radio_type(radio: RadioTypeCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new radio type."""
     db_radio = RadioType(**radio.dict())
     db.add(db_radio)
@@ -944,12 +947,12 @@ def create_radio_type(radio: RadioTypeCreate, db: Session = Depends(get_apclient
     return db_radio
 
 @app.get("/ap/radio-types/", response_model=List[RadioTypeResponse])
-def get_ap_radio_types(db: Session = Depends(get_apclient_db)):
+def get_ap_radio_types(db: Session = Depends(get_apclient_db_dep)):
     """Get all radio types."""
     return db.query(RadioType).all()
 
 @app.post("/ap/client-counts/", response_model=ClientCountAPResponse)
-def create_client_count_ap(count: ClientCountAPCreate, db: Session = Depends(get_apclient_db)):
+def create_client_count_ap(count: ClientCountAPCreate, db: Session = Depends(get_apclient_db_dep)):
     """Create a new AP client count."""
     db_count = ClientCountAP(**count.dict())
     db.add(db_count)
@@ -963,7 +966,7 @@ def get_ap_client_counts(
     radio_id: Optional[int] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    db: Session = Depends(get_apclient_db)
+    db: Session = Depends(get_apclient_db_dep)
 ):
     """Get AP client counts with optional filters."""
     query = db.query(ClientCountAP)

@@ -102,6 +102,14 @@ def get_apclient_db_session():
     """Get an AP client database session without context management."""
     return APClientSessionLocal()
 
+def get_apclient_db_dep():
+    """FastAPI dependency for getting apclientcount DB session (generator, not context manager)."""
+    db = APClientSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 def init_db():
     """Initialize databases by creating tables."""
     try:
@@ -135,5 +143,6 @@ __all__ = [
     'get_apclient_db',
     'get_wireless_db_session',
     'get_apclient_db_session',
+    'get_apclient_db_dep',
     'init_db'
 ]

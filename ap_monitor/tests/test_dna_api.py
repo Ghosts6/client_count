@@ -366,15 +366,8 @@ def test_fetch_ap_data_with_no_location(mock_urlopen):
 
     data = fetch_ap_data(auth_manager)
 
-    assert len(data) == 1
-    ap = data[0]
-    # Verify all location fields are invalid
-    assert ap["location"] is None
-    assert ap["snmpLocation"] == "default location"
-    assert ap["locationName"] == "null"
-    # Verify no valid location parts can be extracted
-    assert not any(loc and loc.lower() != "default location" and loc.lower() != "null" 
-                  for loc in [ap["location"], ap["snmpLocation"], ap["locationName"]])
+    # New logic: AP is skipped due to no valid location, even after fallback
+    assert len(data) == 0
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -594,7 +587,9 @@ def test_fetch_ap_data_missing_required_fields(mock_urlopen):
     auth_manager.get_token.return_value = "mocked_token"
 
     data = fetch_ap_data(auth_manager)
-    assert len(data) == 2  # Should still return both APs, let the processing layer handle missing fields
+    # New logic: Only APs with valid location are returned
+    assert len(data) == 1
+    assert data[0]['effectiveLocation'] == "Global/York University/Keele Campus/Building1/Floor1"
 
 
 @patch("ap_monitor.app.dna_api.urlopen")

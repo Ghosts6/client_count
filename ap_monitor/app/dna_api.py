@@ -314,9 +314,9 @@ def test_api_connection():
             "type": type(e).__name__
         }
 
-def fetch_ap_data(auth_manager, timestamp=None):
+def fetch_ap_data(auth_manager, timestamp=None, clients_data=None):
     """
-    Fetch AP data from DNA Center API with rate limit handling
+    Fetch AP data from DNA Center API with rate limit handling and fallback to client data for location.
     """
     logger.info("Starting AP data fetch")
     
@@ -394,7 +394,15 @@ def fetch_ap_data(auth_manager, timestamp=None):
     
     logger.info(f"Retrieved {len(all_devices)} devices")
     
-    # Process the devices
+    # Build a lookup for AP MAC -> fallback location from clients_data
+    mac_to_fallback_location = {}
+    if clients_data:
+        for client in clients_data:
+            ap_mac = client.get('apMac') or client.get('connectedNetworkDeviceMac')
+            site_hierarchy = client.get('siteHierarchy')
+            if ap_mac and site_hierarchy and ap_mac not in mac_to_fallback_location:
+                mac_to_fallback_location[ap_mac.upper()] = site_hierarchy
+    
     processed_devices = []
     seen_macs = {}  # Track unique MAC addresses with their latest data
     
@@ -404,17 +412,24 @@ def fetch_ap_data(auth_manager, timestamp=None):
             original_location = device.get("location")
             snmp_location = device.get("snmpLocation")
             location_name = device.get("locationName")
+            mac_address = device.get("macAddress", "Unknown")
+            mac_upper = mac_address.upper() if mac_address else None
             
             # Determine effective location
             effective_location = original_location
-            if not effective_location or len(effective_location.split('/')) < 5:
+            if not effective_location or len(effective_location.split('/')) < 2:
                 if snmp_location and snmp_location.lower() != 'default location' and snmp_location.strip():
                     effective_location = snmp_location
                 elif location_name and location_name.strip().lower() != 'null':
                     effective_location = location_name
-            
-            mac_address = device.get("macAddress", "Unknown")
-            
+            # Fallback: use client data if still missing/invalid
+            if (not effective_location or len(effective_location.split('/')) < 2) and mac_upper in mac_to_fallback_location:
+                effective_location = mac_to_fallback_location[mac_upper]
+                logger.info(f"Used fallback location from client data for AP {device.get('name', 'Unknown')} ({mac_address}): {effective_location}")
+            # If still missing, skip
+            if not effective_location or len(effective_location.split('/')) < 2:
+                logger.warning(f"Skipping AP {device.get('name', 'Unknown')} ({mac_address}) due to invalid location (even after fallback): {effective_location}")
+                continue
             # Create processed device
             processed_device = {
                 "name": device.get("name", "Unknown"),
@@ -428,17 +443,13 @@ def fetch_ap_data(auth_manager, timestamp=None):
                 "snmpLocation": snmp_location,
                 "locationName": location_name
             }
-            
             # Always deduplicate by MAC address, keeping the latest data
             seen_macs[mac_address] = processed_device
-            
         except Exception as e:
             logger.error(f"Error processing device {device.get('name', 'Unknown')}: {e}")
             continue
-    
     # Convert the dictionary values to a list
     processed_devices = list(seen_macs.values())
-    
     return processed_devices
 
 def get_ap_data(auth_manager=None, retries=3):
@@ -596,3 +607,127 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
     finally:
         if close_session:
             session.close()
+
+def fetch_clients(auth_manager, retries=3):
+    """Fetch all client devices from the DNA Center API."""
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    url = f"{BASE_URL}/dna/data/api/v1/clients"
+    attempt = 0
+    while attempt < retries:
+        try:
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context, timeout=60) as response:
+                data = json.load(response)
+                return data.get('response', [])
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"Error fetching clients (attempt {attempt}): {e}")
+            if attempt >= retries:
+                logger.error(f"Failed to fetch clients after {retries} attempts: {e}")
+                return []
+            time.sleep(2 ** attempt)
+
+
+def fetch_clients_count_by_site(auth_manager, site_id, retries=3):
+    """Fetch client count for a specific site from the DNA Center API."""
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    url = f"{BASE_URL}/dna/data/api/v1/clients/count?siteId={site_id}"
+    attempt = 0
+    while attempt < retries:
+        try:
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context, timeout=60) as response:
+                data = json.load(response)
+                return data.get('response', {})
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"Error fetching client count for site {site_id} (attempt {attempt}): {e}")
+            if attempt >= retries:
+                logger.error(f"Failed to fetch client count for site {site_id} after {retries} attempts: {e}")
+                return {}
+            time.sleep(2 ** attempt)
+
+
+def fetch_site_health_summaries(auth_manager, retries=3):
+    """Fetch site health summaries from the DNA Center API."""
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    url = f"{BASE_URL}/dna/data/api/v1/siteHealthSummaries"
+    attempt = 0
+    while attempt < retries:
+        try:
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context, timeout=60) as response:
+                data = json.load(response)
+                return data.get('response', [])
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"Error fetching site health summaries (attempt {attempt}): {e}")
+            if attempt >= retries:
+                logger.error(f"Failed to fetch site health summaries after {retries} attempts: {e}")
+                return []
+            time.sleep(2 ** attempt)
+
+
+def fetch_network_devices(auth_manager, retries=3):
+    """Fetch network devices (APs) from the DNA Center API."""
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    url = f"{BASE_URL}/dna/data/api/v1/networkDevices?role=ACCESS"
+    attempt = 0
+    while attempt < retries:
+        try:
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context, timeout=60) as response:
+                data = json.load(response)
+                return data.get('response', [])
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"Error fetching network devices (attempt {attempt}): {e}")
+            if attempt >= retries:
+                logger.error(f"Failed to fetch network devices after {retries} attempts: {e}")
+                return []
+            time.sleep(2 ** attempt)
+
+
+def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
+    """
+    Try to fetch AP/client data using the new endpoints, falling back as needed.
+    Returns a dict with 'source' and 'data'.
+    """
+    # 1. Try network devices (APs with client counts)
+    ap_data = fetch_network_devices(auth_manager, retries)
+    if ap_data:
+        logger.info(f"Fetched AP data from networkDevices endpoint: {len(ap_data)} records.")
+        return {'source': 'networkDevices', 'data': ap_data}
+    # 2. Try clients endpoint (aggregate by AP)
+    clients = fetch_clients(auth_manager, retries)
+    if clients:
+        logger.info(f"Fetched client data from clients endpoint: {len(clients)} records.")
+        return {'source': 'clients', 'data': clients}
+    # 3. Try site health summaries
+    site_health = fetch_site_health_summaries(auth_manager, retries)
+    if site_health:
+        logger.info(f"Fetched site health summaries: {len(site_health)} records.")
+        return {'source': 'siteHealthSummaries', 'data': site_health}
+    # 4. Try clients/count for a specific site if site_id is provided
+    if site_id:
+        count = fetch_clients_count_by_site(auth_manager, site_id, retries)
+        if count:
+            logger.info(f"Fetched client count for site {site_id} from clients/count endpoint.")
+            return {'source': 'clients/count', 'data': count}
+    logger.error("All new API endpoint fetches failed or returned empty data.")
+    return {'source': 'none', 'data': []}
+
+def update_ap_data_task_with_fallback(auth_manager):
+    """Update AP data using AP and client data, with fallback location logic."""
+    logger.info("Starting AP data update task with fallback location support")
+    # Fetch client data for fallback
+    clients_data = fetch_clients(auth_manager)
+    logger.info(f"Fetched {len(clients_data)} client records for fallback location lookup")
+    # Fetch AP data, passing client data for fallback
+    ap_data = fetch_ap_data(auth_manager, clients_data=clients_data)
+    logger.info(f"Fetched {len(ap_data)} AP records after applying fallback location logic")
+    # ... continue with processing ap_data as before ...

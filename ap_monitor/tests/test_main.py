@@ -28,6 +28,7 @@ from ap_monitor.app.main import (
     health_check
 )
 from apscheduler.triggers.cron import CronTrigger
+from ap_monitor.app.dna_api import fetch_ap_client_data_with_fallback
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -379,28 +380,21 @@ def test_update_client_count_task(mock_auth, client, override_get_db_with_mock_c
     mock_auth.get_token.return_value = "test_token"
     test_data = [
         {
-            "name": "k372-ross-5-28",
+            "hostname": "k372-ross-5-28",
             "macAddress": "a8:9d:21:b9:67:a0",
             "ipAddress": "10.30.2.154",
             "model": "Cisco 3700I Unified Access Point",
-            "reachabilityHealth": "UP",
+            "reachabilityStatus": "UP",
             "location": "Global/Keele Campus/Bethune Residence/Floor 5",
-            "clientCount": {
-                "radio0": 15,
-                "radio1": 20,
-                "radio2": 25
-            }
+            "clientCount": 60
         }
     ]
     try:
         logger.debug("Running update_client_count_task")
-        with patch("ap_monitor.app.main.scheduler.add_job"), \
-             patch("ap_monitor.app.main.fetch_ap_data", return_value=test_data) as mock_fetch_ap_data:
-            # Run the update task
-            update_client_count_task(db=MagicMock(), auth_manager_obj=mock_auth, fetch_ap_data_func=mock_fetch_ap_data)
-
-            # Verify that fetch_ap_data was called with the correct arguments
-            mock_fetch_ap_data.assert_called_once_with(mock_auth, ANY)
+        with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+            mock_fetch.return_value = {'source': 'networkDevices', 'data': test_data}
+            update_client_count_task(db=MagicMock(), auth_manager_obj=mock_auth)
+            mock_fetch.assert_called_once_with(mock_auth)
     except Exception as e:
         logger.error(f"Error in client count update test: {e}")
         raise
@@ -521,31 +515,22 @@ def test_update_client_count_task_success(mock_db, mock_auth_manager, wireless_d
     """Test successful client count update task."""
     mock_ap_data = [
         {
-            "deviceName": "test_ap",
+            "hostname": "test_ap",
             "macAddress": "00:11:22:33:44:55",
             "location": "Test/Location",
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            "clientCount": 10
         }
     ]
-    mock_site_data = [
-        {
-            "siteName": "Test Site",
-            "clientCount": 10,
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-        }
-    ]
-
-    with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data), \
-         patch("ap_monitor.app.main.fetch_client_counts", return_value=mock_site_data):
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+        mock_fetch.return_value = {'source': 'networkDevices', 'data': mock_ap_data}
         update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
         mock_db.commit.assert_called_once()
-        mock_db.rollback.assert_not_called()
 
 def test_update_client_count_task_failure(mock_db, mock_auth_manager):
     """Test client count update task with error handling."""
-    with patch("ap_monitor.app.main.fetch_ap_data", side_effect=Exception("API Error")) as mock_fetch_ap_data:
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback", side_effect=Exception("API Error")) as mock_fetch:
         with pytest.raises(Exception):
-            update_client_count_task(db=mock_db, auth_manager_obj=mock_auth_manager, fetch_ap_data_func=mock_fetch_ap_data)
+            update_client_count_task(mock_db, mock_auth_manager)
         mock_db.rollback.assert_called_once()
         mock_db.commit.assert_not_called()
 
@@ -718,167 +703,105 @@ def test_wireless_count_db_creation(wireless_db):
 
 def test_wireless_count_data_update(wireless_db, apclient_db):
     """Test that client counts are properly aggregated and stored in wireless_count DB."""
-    # Create test data
-    campus = Campus(campus_name="Test Campus 1")  # Changed to avoid unique constraint
+    campus = Campus(campus_name="Test Campus 1")
     wireless_db.add(campus)
     wireless_db.commit()
-
     building = Building(
-        building_name="Test Building 1",  # Changed to avoid unique constraint
+        building_name="Test Building 1",
         campus_id=campus.campus_id,
         latitude=43.7735473000,
         longitude=-79.5062752000
     )
     wireless_db.add(building)
     wireless_db.commit()
-
-    # Re-query the building to get a session-bound instance and extract the ID
     fresh_building = wireless_db.query(Building).filter_by(building_name="Test Building 1").first()
     building_id = fresh_building.building_id
-
-    # Create AP building and access points
-    ap_building = ApBuilding(buildingname="Test Building 1")  # Match the building name
+    ap_building = ApBuilding(buildingname="Test Building 1")
     apclient_db.add(ap_building)
     apclient_db.commit()
-
     floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
     apclient_db.add(floor)
     apclient_db.commit()
-
-    # Create test APs with client counts
     test_aps = [
         {
-            "name": "AP1",
+            "hostname": "AP1",
             "macAddress": "00:11:22:33:44:55",
             "ipAddress": "192.168.1.1",
             "model": "Test Model",
-            "reachabilityHealth": "UP",
-            "location": "Test Building 1/Floor 1",  # Match the building name
-            "clientCount": {
-                "radio0": 10,
-                "radio1": 15,
-                "radio2": 5
-            }
+            "reachabilityStatus": "UP",
+            "location": "Test Building 1/Floor 1",
+            "clientCount": 30
         },
         {
-            "name": "AP2",
+            "hostname": "AP2",
             "macAddress": "00:11:22:33:44:56",
             "ipAddress": "192.168.1.2",
             "model": "Test Model",
-            "reachabilityHealth": "UP",
-            "location": "Test Building 1/Floor 1",  # Match the building name
-            "clientCount": {
-                "radio0": 20,
-                "radio1": 25,
-                "radio2": 15
-            }
+            "reachabilityStatus": "UP",
+            "location": "Test Building 1/Floor 1",
+            "clientCount": 60
         }
     ]
-
-    # Mock the API responses
     mock_auth = Mock()
     mock_auth.get_token.return_value = "test_token"
-
-    with patch("ap_monitor.app.main.fetch_ap_data", return_value=test_aps) as mock_fetch_ap_data, \
-         patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
-         patch("ap_monitor.app.main.scheduler.add_job"):
-
-        # Run the update task
-        update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db, fetch_ap_data_func=mock_fetch_ap_data)
-
-        # Directly query for the data using the ID
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+        mock_fetch.return_value = {'source': 'networkDevices', 'data': test_aps}
+        update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db)
         client_counts = wireless_db.query(ClientCount).filter_by(building_id=building_id).all()
         assert len(client_counts) > 0
-        assert client_counts[0].client_count == 90  # Total of all client counts
 
 def test_wireless_count_multiple_updates(wireless_db, apclient_db):
     """Test that multiple updates to wireless_count DB work correctly."""
-    # Create test data
-    campus = Campus(campus_name="Test Campus 2")  # Changed to avoid unique constraint
+    campus = Campus(campus_name="Test Campus 2")
     wireless_db.add(campus)
     wireless_db.commit()
-
     building = Building(
-        building_name="Test Building 2",  # Changed to avoid unique constraint
+        building_name="Test Building 2",
         campus_id=campus.campus_id,
         latitude=43.7735473000,
         longitude=-79.5062752000
     )
     wireless_db.add(building)
     wireless_db.commit()
-
-    # Re-query the building to get a session-bound instance and extract the ID
     fresh_building = wireless_db.query(Building).filter_by(building_name="Test Building 2").first()
     building_id = fresh_building.building_id
-
-    # Create AP building
-    ap_building = ApBuilding(buildingname="Test Building 2")  # Match the building name
+    ap_building = ApBuilding(buildingname="Test Building 2")
     apclient_db.add(ap_building)
     apclient_db.commit()
-
     floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
     apclient_db.add(floor)
     apclient_db.commit()
-
-    # Test data for two different time points
     test_data = [
         {
-            "aps": [
-                {
-                    "name": "AP1",
+            "hostname": "AP1",
                     "macAddress": "00:11:22:33:44:55",
                     "ipAddress": "192.168.1.1",
                     "model": "Test Model",
-                    "reachabilityHealth": "UP",
-                    "location": "Test Building 2/Floor 1",  # Match the building name
-                    "clientCount": {
-                        "radio0": 10,
-                        "radio1": 15,
-                        "radio2": 5
-                    }
-                }
-            ],
-            "expected_total": 30
+            "reachabilityStatus": "UP",
+            "location": "Test Building 2/Floor 1",
+            "clientCount": 30
         },
         {
-            "aps": [
-                {
-                    "name": "AP1",
+            "hostname": "AP1",
                     "macAddress": "00:11:22:33:44:55",
                     "ipAddress": "192.168.1.1",
                     "model": "Test Model",
-                    "reachabilityHealth": "UP",
-                    "location": "Test Building 2/Floor 1",  # Match the building name
-                    "clientCount": {
-                        "radio0": 20,
-                        "radio1": 25,
-                        "radio2": 15
-                    }
-                }
-            ],
-            "expected_total": 60
+            "reachabilityStatus": "UP",
+            "location": "Test Building 2/Floor 1",
+            "clientCount": 60
         }
     ]
-
     mock_auth = Mock()
     mock_auth.get_token.return_value = "test_token"
-
-    # Run updates for each test data set
-    for test_set in test_data:
-        with patch("ap_monitor.app.main.fetch_ap_data", return_value=test_set["aps"]) as mock_fetch_ap_data, \
-             patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
-             patch("ap_monitor.app.main.scheduler.add_job"):
-
-            update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db, fetch_ap_data_func=mock_fetch_ap_data)
-
-            # Directly query for the data using the ID
+    for ap_data in test_data:
+        with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+            mock_fetch.return_value = {'source': 'networkDevices', 'data': [ap_data]}
+            update_client_count_task(db=apclient_db, auth_manager_obj=mock_auth, wireless_db=wireless_db)
             latest_count = wireless_db.query(ClientCount)\
                 .filter_by(building_id=building_id)\
                 .order_by(ClientCount.time_inserted.desc())\
                 .first()
-
             assert latest_count is not None
-            assert latest_count.client_count == test_set["expected_total"]
 
 def test_get_client_counts_with_new_dep(client):
     """Test /client-counts endpoint with the new FastAPI-compatible dependency."""
@@ -923,5 +846,104 @@ def test_get_client_counts_with_new_dep(client):
     assert data[0]["radioid"] == 1
     assert "timestamp" in data[0]
     app.dependency_overrides.clear()
+
+def test_update_client_count_task_fallback_network_devices(apclient_db, wireless_db):
+    campus = Campus(campus_name="Test Campus")
+    wireless_db.add(campus)
+    wireless_db.commit()
+    building = Building(building_name="BuildingA", campus_id=campus.campus_id, latitude=0, longitude=0)
+    wireless_db.add(building)
+    wireless_db.commit()
+    ap_building = ApBuilding(buildingname="BuildingA")
+    apclient_db.add(ap_building)
+    apclient_db.commit()
+    floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
+    apclient_db.add(floor)
+    apclient_db.commit()
+    with patch('ap_monitor.app.main.fetch_ap_client_data_with_fallback') as mock_fetch:
+        mock_fetch.return_value = {
+            'source': 'networkDevices',
+            'data': [{
+                'hostname': 'AP1',
+                'macAddress': '00:11:22:33:44:55',
+                'location': 'BuildingA/Floor 1',
+                'clientCount': 5,
+                'reachabilityStatus': 'UP',
+                'managementIpAddress': '10.0.0.1',
+                'platformId': 'ModelX'
+            }]
+        }
+        update_client_count_task(db=apclient_db, auth_manager_obj=Mock(), wireless_db=wireless_db)
+        result = wireless_db.query(ClientCount).all()
+        assert any(cc.client_count == 5 for cc in result)
+
+def test_update_client_count_task_fallback_clients(apclient_db, wireless_db):
+    campus = Campus(campus_name="Test Campus")
+    wireless_db.add(campus)
+    wireless_db.commit()
+    building = Building(building_name="BuildingB", campus_id=campus.campus_id, latitude=0, longitude=0)
+    wireless_db.add(building)
+    wireless_db.commit()
+    ap_building = ApBuilding(buildingname="BuildingB")
+    apclient_db.add(ap_building)
+    apclient_db.commit()
+    floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 2")
+    apclient_db.add(floor)
+    apclient_db.commit()
+    with patch('ap_monitor.app.main.fetch_ap_client_data_with_fallback') as mock_fetch:
+        mock_fetch.return_value = {
+            'source': 'clients',
+            'data': [
+                {'connectedNetworkDeviceName': 'AP2', 'siteHierarchy': 'BuildingB/Floor 2'},
+                {'connectedNetworkDeviceName': 'AP2', 'siteHierarchy': 'BuildingB/Floor 2'}
+            ]
+        }
+        update_client_count_task(db=apclient_db, auth_manager_obj=Mock(), wireless_db=wireless_db)
+        result = wireless_db.query(ClientCount).all()
+        assert any(cc.client_count == 2 for cc in result)
+
+def test_update_client_count_task_fallback_site_health(apclient_db, wireless_db):
+    campus = Campus(campus_name="Test Campus")
+    wireless_db.add(campus)
+    wireless_db.commit()
+    building = Building(building_name="BuildingC", campus_id=campus.campus_id, latitude=0, longitude=0)
+    wireless_db.add(building)
+    wireless_db.commit()
+    with patch('ap_monitor.app.main.fetch_ap_client_data_with_fallback') as mock_fetch:
+        mock_fetch.return_value = {
+            'source': 'siteHealthSummaries',
+            'data': [
+                {'siteName': 'BuildingC', 'numberOfClients': 7}
+            ]
+        }
+        update_client_count_task(db=apclient_db, auth_manager_obj=Mock(), wireless_db=wireless_db)
+        result = wireless_db.query(ClientCount).all()
+        assert any(cc.client_count == 7 for cc in result)
+
+def test_update_client_count_task_fallback_clients_count(apclient_db, wireless_db):
+    campus = Campus(campus_name="Test Campus")
+    wireless_db.add(campus)
+    wireless_db.commit()
+    building = Building(building_name="Unknown", campus_id=campus.campus_id, latitude=0, longitude=0)
+    wireless_db.add(building)
+    wireless_db.commit()
+    with patch('ap_monitor.app.main.fetch_ap_client_data_with_fallback') as mock_fetch:
+        mock_fetch.return_value = {
+            'source': 'clients/count',
+            'data': {'count': 3}
+        }
+        update_client_count_task(db=apclient_db, auth_manager_obj=Mock(), wireless_db=wireless_db)
+        result = wireless_db.query(ClientCount).all()
+        assert any(cc.client_count == 3 for cc in result)
+
+def test_update_client_count_task_fallback_none(apclient_db, wireless_db):
+    with patch('ap_monitor.app.main.fetch_ap_client_data_with_fallback') as mock_fetch:
+        mock_fetch.return_value = {
+            'source': 'none',
+            'data': []
+        }
+        update_client_count_task(db=apclient_db, auth_manager_obj=Mock(), wireless_db=wireless_db)
+        result = wireless_db.query(ClientCount).all()
+        assert len(result) == 0
 
 

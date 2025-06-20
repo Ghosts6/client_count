@@ -27,7 +27,10 @@ from ap_monitor.app.models import (
     Campus, Building, ClientCount,
     ApBuilding, Floor, Room, AccessPoint, RadioType, ClientCountAP
 )
-from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, radio_id_map
+from ap_monitor.app.dna_api import (
+    AuthManager, fetch_client_counts, fetch_ap_data, radio_id_map,
+    fetch_ap_client_data_with_fallback
+)
 from ap_monitor.app.utils import setup_logging, calculate_next_run_time
 from ap_monitor.app.schemas import (
     CampusCreate, CampusResponse,
@@ -396,7 +399,6 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
     """Update client count data from DNA Center API."""
     close_db = False
     close_wireless_db = False
-    
     try:
         # Get database sessions if not provided
         if db is None:
@@ -405,122 +407,162 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         if wireless_db is None:
             wireless_db = get_wireless_db_session()
         close_wireless_db = True
-        
-        # Get current time for timestamps
         now = datetime.now(timezone.utc)
         rounded_unix_timestamp = int(now.timestamp())
-        
-        # Use provided auth_manager or default
         auth_manager_obj = auth_manager_obj or auth_manager
-        
-        # Dual-path logic for fetching AP/client count data
-        if fetch_client_counts_func:
-            ap_data = fetch_client_counts_func(auth_manager_obj, rounded_unix_timestamp)
-        elif fetch_ap_data_func:
-            ap_data = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
-        else:
-            ap_data = fetch_client_counts(auth_manager_obj, rounded_unix_timestamp)
-        
-        # Track building totals
+        # Use new fallback logic for fetching AP/client data
+        result = fetch_ap_client_data_with_fallback(auth_manager_obj)
+        source = result['source']
+        ap_data = result['data']
+        if not ap_data:
+            logger.error("No AP/client data available from any endpoint. Skipping update.")
+            return
         building_totals = {}
-        
-        # Get all buildings from wireless_count DB
         wireless_buildings = {b.building_name.lower(): b for b in wireless_db.query(Building).all()}
-        
-        # Process AP data for apclientcount DB
-        for ap in ap_data:
-            ap_name = ap.get('name')
-            
-            # Try different location fields in order of preference
-            location = ap.get('location')
-            if not location or len(location.split('/')) < 2:
-                location = ap.get('snmpLocation')
-            if not location or len(location.split('/')) < 2:
-                location = ap.get('locationName')
-            
-            building_name, floor_name = parse_location(location)
-            if not building_name or not floor_name:
-                logger.warning(f"Skipping AP {ap_name} due to invalid location: {location}")
-                continue
-            
-            # Building - Use apclient_db (db) for ApBuilding model
-            building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
-            if not building:
-                building = ApBuilding(buildingname=building_name)
-                db.add(building)
-                db.flush()
-            
-            # Floor - Use apclient_db (db) for Floor model
-            floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
-            if not floor:
-                floor = Floor(floorname=floor_name, buildingid=building.buildingid)
-                db.add(floor)
-                db.flush()
-            
-            # Access Point - Use apclient_db (db) for AccessPoint model
-            mac_address = ap.get('macAddress')
-            ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
-            is_active = ap.get('reachabilityHealth') == "UP"
-            
-            if not ap_record:
-                logger.debug(f"Creating new AccessPoint: {ap.get('name')} with MAC: {mac_address}")
-                ap_record = AccessPoint(
-                    apname=ap.get('name'),
-                    macaddress=mac_address,
-                    ipaddress=ap.get('ipAddress'),
-                    modelname=ap.get('model'),
-                    isactive=is_active,
-                    floorid=floor.floorid,
-                    buildingid=building.buildingid
-                )
-                db.add(ap_record)
-                db.flush()
-            else:
-                logger.debug(f"Updating existing AccessPoint: {ap.get('name')}")
-                ap_record.isactive = is_active
-                ap_record.floorid = floor.floorid
-                ap_record.buildingid = building.buildingid
-
-            # Create client count records for each radio and track building totals
-            client_counts = ap.get('clientCount', {})
-            building_total = 0
-            for radio_name, count in client_counts.items():
-                # Use apclient_db (db) for RadioType model
-                radio = db.query(RadioType).filter_by(radioname=radio_name).first()
-                if not radio:
-                    logger.warning(f"Unexpected radio key: {radio_name}")
+        # --- Process data based on source ---
+        if source == 'networkDevices':
+            # Each entry is an AP with clientCount, location, etc.
+            for ap in ap_data:
+                ap_name = ap.get('hostname') or ap.get('name')
+                location = ap.get('location') or ap.get('snmpLocation') or ap.get('locationName')
+                building_name, floor_name = parse_location(location)
+                if not building_name or not floor_name:
+                    logger.warning(f"Skipping AP {ap_name} due to invalid location: {location}")
                     continue
-
-                # Check for existing record - Use apclient_db (db) for ClientCountAP model
-                cc = db.query(ClientCountAP).filter_by(
-                    apid=ap_record.apid,
-                    radioid=radio.radioid,
-                    timestamp=now
-                ).first()
-
-                if cc:
-                    cc.clientcount = count
+                building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
+                if not building:
+                    building = ApBuilding(buildingname=building_name)
+                    db.add(building)
+                    db.flush()
+                floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
+                if not floor:
+                    floor = Floor(floorname=floor_name, buildingid=building.buildingid)
+                    db.add(floor)
+                    db.flush()
+                mac_address = ap.get('macAddress')
+                ap_record = db.query(AccessPoint).filter_by(macaddress=mac_address).first()
+                is_active = ap.get('reachabilityStatus', ap.get('reachabilityHealth')) == "UP"
+                if not ap_record:
+                    ap_record = AccessPoint(
+                        apname=ap_name,
+                        macaddress=mac_address,
+                        ipaddress=ap.get('managementIpAddress', ap.get('ipAddress')),
+                        modelname=ap.get('platformId', ap.get('model')),
+                        isactive=is_active,
+                        floorid=floor.floorid,
+                        buildingid=building.buildingid
+                    )
+                    db.add(ap_record)
+                    db.flush()
                 else:
-                    cc = ClientCountAP(
+                    ap_record.isactive = is_active
+                    ap_record.floorid = floor.floorid
+                    ap_record.buildingid = building.buildingid
+                # Only one total client count per AP in this endpoint
+                count = ap.get('clientCount', ap.get('clients', 0))
+                if isinstance(count, dict):
+                    count = sum(count.values())
+                building_totals.setdefault(building_name, 0)
+                building_totals[building_name] += count or 0
+                # Insert/update ClientCountAP for radio0 (fallback)
+                radio = db.query(RadioType).filter_by(radioname='radio0').first()
+                if radio:
+                    cc = db.query(ClientCountAP).filter_by(
                         apid=ap_record.apid,
                         radioid=radio.radioid,
-                        clientcount=count,
                         timestamp=now
+                    ).first()
+                    if cc:
+                        cc.clientcount = count or 0
+                    else:
+                        cc = ClientCountAP(
+                            apid=ap_record.apid,
+                            radioid=radio.radioid,
+                            clientcount=count or 0,
+                            timestamp=now
+                        )
+                        db.add(cc)
+        elif source == 'clients':
+            # Aggregate by AP and building
+            ap_map = {}
+            for client in ap_data:
+                ap_name = client.get('connectedNetworkDeviceName')
+                location = client.get('siteHierarchy')
+                building_name, floor_name = parse_location(location)
+                if not ap_name or not building_name or not floor_name:
+                    continue
+                ap_map.setdefault(ap_name, {'count': 0, 'building': building_name, 'floor': floor_name})
+                ap_map[ap_name]['count'] += 1
+            for ap_name, info in ap_map.items():
+                building_name = info['building']
+                floor_name = info['floor']
+                count = info['count']
+                building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
+                if not building:
+                    building = ApBuilding(buildingname=building_name)
+                    db.add(building)
+                    db.flush()
+                floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
+                if not floor:
+                    floor = Floor(floorname=floor_name, buildingid=building.buildingid)
+                    db.add(floor)
+                    db.flush()
+                ap_record = db.query(AccessPoint).filter_by(apname=ap_name).first()
+                if not ap_record:
+                    ap_record = AccessPoint(
+                        apname=ap_name,
+                        macaddress=None,
+                        ipaddress=None,
+                        modelname=None,
+                        isactive=True,
+                        floorid=floor.floorid,
+                        buildingid=building.buildingid
                     )
-                    db.add(cc)
-                building_total += count
-            
-            # Add to building totals
-            if building_name not in building_totals:
-                building_totals[building_name] = 0
-            building_totals[building_name] += building_total
-        
-        # Update wireless_count DB with building totals
+                    db.add(ap_record)
+                    db.flush()
+                building_totals.setdefault(building_name, 0)
+                building_totals[building_name] += count
+                radio = db.query(RadioType).filter_by(radioname='radio0').first()
+                if radio:
+                    cc = db.query(ClientCountAP).filter_by(
+                        apid=ap_record.apid,
+                        radioid=radio.radioid,
+                        timestamp=now
+                    ).first()
+                    if cc:
+                        cc.clientcount = count
+                    else:
+                        cc = ClientCountAP(
+                            apid=ap_record.apid,
+                            radioid=radio.radioid,
+                            clientcount=count,
+                            timestamp=now
+                        )
+                        db.add(cc)
+        elif source == 'siteHealthSummaries':
+            # Each entry is a site/building summary
+            for site in ap_data:
+                building_name = site.get('siteName')
+                count = site.get('numberOfClients', 0)
+                if not building_name:
+                    continue
+                building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
+                if not building:
+                    building = ApBuilding(buildingname=building_name)
+                    db.add(building)
+                    db.flush()
+                building_totals.setdefault(building_name, 0)
+                building_totals[building_name] += count
+        elif source == 'clients/count':
+            # Only total count for a site
+            count = ap_data.get('count', 0)
+            building_name = 'Unknown'  # Could not map to building
+            building_totals.setdefault(building_name, 0)
+            building_totals[building_name] += count
+        # --- Update wireless_count DB with building totals ---
         for building_name, total_clients in building_totals.items():
-            # Find building in wireless_count DB using case-insensitive comparison
             building = wireless_buildings.get(building_name.lower())
             if building:
-                # Create new client count record - Use wireless_db for ClientCount model
                 client_count = ClientCount(
                     building_id=building.building_id,
                     client_count=total_clients,
@@ -530,11 +572,8 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                 logger.info(f"Updated client count for building {building_name}: {total_clients}")
             else:
                 logger.warning(f"Building {building_name} not found in wireless_count database")
-        
-        # Handle buildings with no APs or zero counts
         for building_name, building in wireless_buildings.items():
             if building_name.lower() not in {k.lower() for k in building_totals}:
-                # Create zero count record for buildings with no APs - Use wireless_db for ClientCount model
                 client_count = ClientCount(
                     building_id=building.building_id,
                     client_count=0,
@@ -542,19 +581,16 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                 )
                 wireless_db.add(client_count)
                 logger.info(f"Created zero count record for building {building_name}")
-        
-        # Commit both databases
         db.commit()
         wireless_db.commit()
         logger.info("Client count data updated successfully in both databases")
-
     except Exception as e:
         if db:
             db.rollback()
         if wireless_db:
             wireless_db.rollback()
         logger.error(f"Error updating client count data: {str(e)}")
-        raise  # Re-raise to trigger scheduler's error handling
+        raise
     finally:
         if close_db and db:
             db.close()

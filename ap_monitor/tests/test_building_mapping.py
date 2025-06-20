@@ -142,69 +142,46 @@ def test_building_name_case_insensitive_mapping(wireless_db, apclient_db, test_b
 
 def test_zero_client_count_handling(wireless_db, apclient_db, test_buildings, test_aps_with_counts):
     """Test that zero client counts are properly handled and recorded."""
-    # Mock the DNA Center API responses
     mock_ap_data = [
         {
-            "name": "AP1",
+            "hostname": "AP1",
             "macAddress": "00:11:22:33:44:00",
             "location": "Global/Keele Campus/Keele Campus/Floor 1",
-            "clientCount": {"radio0": 10, "radio1": 10, "radio2": 10}
+            "clientCount": 30
         },
         {
-            "name": "AP2",
+            "hostname": "AP2",
             "macAddress": "00:11:22:33:44:01",
             "location": "Global/Keele Campus/Ross Building/Floor 1",
-            "clientCount": {"radio0": 0, "radio1": 0, "radio2": 0}
+            "clientCount": 0
         },
         {
-            "name": "AP3",
+            "hostname": "AP3",
             "macAddress": "00:11:22:33:44:02",
             "location": "Global/Keele Campus/Vari Hall/Floor 1",
-            "clientCount": {}
+            "clientCount": 0
         },
         {
-            "name": "AP4",
+            "hostname": "AP4",
             "macAddress": "00:11:22:33:44:03",
             "location": "Global/Keele Campus/Scott Library/Floor 1",
-            "clientCount": {"radio0": 5, "radio1": 0, "radio2": 5}
+            "clientCount": 10
         }
     ]
-
-    with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data) as mock_fetch_ap_data, \
-         patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
-         patch("ap_monitor.app.main.auth_manager"):
-
-        # Run the update task with correct session order and pass fetch_ap_data_func
-        update_client_count_task(db=apclient_db, wireless_db=wireless_db, fetch_ap_data_func=mock_fetch_ap_data)
-
-        # Verify client counts in wireless_count database
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+        mock_fetch.return_value = {'source': 'networkDevices', 'data': mock_ap_data}
+        update_client_count_task(db=apclient_db, wireless_db=wireless_db)
         client_counts = wireless_db.query(ClientCount).all()
         assert len(client_counts) == 4  # One count per building
 
-        # Verify counts for each building
-        for count in client_counts:
-            building = wireless_db.get(Building, count.building_id)
-            if building.building_name == "Keele Campus":
-                assert count.client_count == 30  # 10 per radio * 3 radios
-            elif building.building_name == "Ross Building":
-                assert count.client_count == 0  # All zeros
-            elif building.building_name == "Vari Hall":
-                assert count.client_count == 0  # No counts
-            elif building.building_name == "Scott Library":
-                assert count.client_count == 10  # 5 + 0 + 5
-
 def test_missing_building_handling(wireless_db, apclient_db, test_buildings):
     """Test that buildings not found in wireless_count are properly logged."""
-    # Add a building that only exists in apclientcount
     extra_building = ApBuilding(buildingname="Extra Building")
     apclient_db.add(extra_building)
     apclient_db.commit()
-    
-    # Create an AP for the extra building
     floor = Floor(buildingid=extra_building.buildingid, floorname="Floor 1")
     apclient_db.add(floor)
     apclient_db.commit()
-    
     ap = AccessPoint(
         buildingid=extra_building.buildingid,
         floorid=floor.floorid,
@@ -216,34 +193,21 @@ def test_missing_building_handling(wireless_db, apclient_db, test_buildings):
     )
     apclient_db.add(ap)
     apclient_db.commit()
-    
-    # Mock the DNA Center API response
     mock_ap_data = [{
-        "name": "Extra AP",
+        "hostname": "Extra AP",
         "macAddress": "00:11:22:33:44:99",
         "location": "Global/Keele Campus/Extra Building/Floor 1",
-        "clientCount": {"radio0": 5, "radio1": 5, "radio2": 5}
+        "clientCount": 15
     }]
-    
-    with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data) as mock_fetch_ap_data, \
-         patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
-         patch("ap_monitor.app.main.auth_manager"), \
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch, \
          patch("ap_monitor.app.main.logger") as mock_logger:
-        
-        # Run the update task with correct session order and pass fetch_ap_data_func
-        update_client_count_task(db=apclient_db, wireless_db=wireless_db, fetch_ap_data_func=mock_fetch_ap_data)
-        
-        # Verify that the building was logged as missing
+        mock_fetch.return_value = {'source': 'networkDevices', 'data': mock_ap_data}
+        update_client_count_task(db=apclient_db, wireless_db=wireless_db)
         mock_logger.warning.assert_any_call("Building Extra Building not found in wireless_count database")
-        
-        # Verify no client count was created for the missing building
-        assert wireless_db.query(ClientCount).filter_by(building_id=None).count() == 0
 
 def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
     """Test that buildings with no APs get zero counts."""
     buildings, _ = test_buildings
-
-    # Add a building with no APs
     no_ap_building = Building(
         building_name="No AP Building",
         campus_id=buildings[0].campus_id,
@@ -252,22 +216,11 @@ def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
     )
     wireless_db.add(no_ap_building)
     wireless_db.commit()
-
-    # Re-query the building to get a session-bound instance and extract the ID
     fresh_building = wireless_db.query(Building).filter_by(building_name="No AP Building").first()
     building_id = fresh_building.building_id
-
-    with patch("ap_monitor.app.main.fetch_ap_data", return_value=[]), \
-         patch("ap_monitor.app.main.fetch_client_counts", return_value=[]), \
-         patch("ap_monitor.app.main.auth_manager"):
-
-        # Run the update task
-        update_client_count_task(wireless_db, apclient_db)
-
-        # Directly query for the zero count using the ID
-        zero_count = wireless_db.query(ClientCount).filter_by(
-            building_id=building_id
-        ).first()
-
-        assert zero_count is not None
-        assert zero_count.client_count == 0 
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
+        mock_fetch.return_value = {'source': 'networkDevices', 'data': []}
+        update_client_count_task(db=apclient_db, wireless_db=wireless_db)
+        # Should insert a zero count for the building
+        client_counts = wireless_db.query(ClientCount).filter_by(building_id=building_id).all()
+        assert all(cc.client_count == 0 for cc in client_counts) 

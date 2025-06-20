@@ -18,7 +18,9 @@ from ap_monitor.app.models import (
 )
 from ap_monitor.app.db import (
     get_wireless_db,
-    get_apclient_db
+    get_apclient_db,
+    get_wireless_db_dep,
+    get_apclient_db_dep
 )
 from ap_monitor.app.main import app
 
@@ -62,26 +64,19 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 @pytest.fixture(autouse=True)
 def create_test_db():
     # Import wireless models before creating wireless tables
-    from ap_monitor.app.models import Building, Campus, ClientCount, WirelessBase
+    from ap_monitor.app.models import Building, Campus, ClientCount, WirelessBase, ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType, APClientBase
     WirelessBase.metadata.drop_all(bind=wireless_engine)
     WirelessBase.metadata.create_all(bind=wireless_engine)
-
-    # Import apclient models before creating apclient tables
-    from ap_monitor.app.models import ApBuilding, Floor, Room, AccessPoint, ClientCountAP, RadioType, APClientBase
     APClientBase.metadata.drop_all(bind=apclient_engine)
     APClientBase.metadata.create_all(bind=apclient_engine)
-    
     # Verify tables are created correctly
     inspector = inspect(apclient_engine)
     tables = inspector.get_table_names()
     print(f"Tables in apclient_engine: {tables}")
-    
-    # Verify table schemas
     for table_name in ['buildings', 'floors', 'rooms', 'accesspoints', 'clientcount', 'radiotypes']:
         assert table_name in tables, f"{table_name} table not created"
         columns = [col['name'] for col in inspector.get_columns(table_name)]
         print(f"Columns in {table_name}: {columns}")
-    
     # Add default radio types
     with APClientSessionLocal() as session:
         if not session.query(RadioType).first():
@@ -91,9 +86,7 @@ def create_test_db():
                 RadioType(radioname="radio2", radioid=3)
             ])
             session.commit()
-    
     yield
-    
     WirelessBase.metadata.drop_all(bind=wireless_engine)
     APClientBase.metadata.drop_all(bind=apclient_engine)
 
@@ -131,8 +124,22 @@ def client(wireless_db, apclient_db, scheduler):
         finally:
             pass
     
+    def override_get_wireless_db_dep():
+        try:
+            yield wireless_db
+        finally:
+            pass
+    
+    def override_get_apclient_db_dep():
+        try:
+            yield apclient_db
+        finally:
+            pass
+    
     app.dependency_overrides[get_wireless_db] = override_get_wireless_db
     app.dependency_overrides[get_apclient_db] = override_get_apclient_db
+    app.dependency_overrides[get_wireless_db_dep] = override_get_wireless_db_dep
+    app.dependency_overrides[get_apclient_db_dep] = override_get_apclient_db_dep
     
     # Add scheduler to app state
     app.state.scheduler = scheduler

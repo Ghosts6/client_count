@@ -83,15 +83,17 @@ def override_get_db_with_mock_ap():
     def override():
         yield mock_session
 
+    from ap_monitor.app.db import get_wireless_db_dep, get_apclient_db_dep
     app.dependency_overrides[get_wireless_db] = override
     app.dependency_overrides[get_apclient_db] = override
+    app.dependency_overrides[get_wireless_db_dep] = override
+    app.dependency_overrides[get_apclient_db_dep] = override
     yield
     app.dependency_overrides.clear()
 
 @pytest.fixture
 def override_get_db_with_mock_buildings():
     mock_building = MagicMock()
-    # Patch to match the API's expected attribute names and values
     mock_building.building_id = 1
     mock_building.building_name = "BuildingA"
 
@@ -104,8 +106,11 @@ def override_get_db_with_mock_buildings():
     def override():
         yield mock_session
 
+    from ap_monitor.app.db import get_wireless_db_dep, get_apclient_db_dep
     app.dependency_overrides[get_wireless_db] = override
     app.dependency_overrides[get_apclient_db] = override
+    app.dependency_overrides[get_wireless_db_dep] = override
+    app.dependency_overrides[get_apclient_db_dep] = override
     yield
     app.dependency_overrides.clear()
 
@@ -353,10 +358,13 @@ def override_get_db_with_mock_aps():
     mock_session.query.return_value = mock_query
 
     def override():
-        return mock_session
+        yield mock_session
 
+    from ap_monitor.app.db import get_wireless_db_dep, get_apclient_db_dep
     app.dependency_overrides[get_wireless_db] = override
     app.dependency_overrides[get_apclient_db] = override
+    app.dependency_overrides[get_wireless_db_dep] = override
+    app.dependency_overrides[get_apclient_db_dep] = override
     yield
     app.dependency_overrides.clear()
 

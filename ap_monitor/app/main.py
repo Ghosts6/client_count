@@ -21,7 +21,8 @@ from ap_monitor.app.db import (
     init_db,
     WirelessBase,
     APClientBase,
-    get_apclient_db_dep
+    get_apclient_db_dep,
+    get_wireless_db_dep
 )
 from ap_monitor.app.models import (
     Campus, Building, ClientCount,
@@ -714,13 +715,12 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
         raise
 
 @app.get("/aps", response_model=List[dict], tags=["Access Points"])
-def get_aps(db: Session = Depends(get_wireless_db)):
+def get_aps(db: Session = Depends(get_wireless_db_dep)):
     """Get all access points from the database."""
     try:
         logger.info("Fetching AP data from the database")
         aps = db.query(AccessPoint).all()
         logger.info(f"Retrieved {len(aps)} AP records")
-        
         return [{
             "apid": ap.apid,
             "apname": ap.apname,
@@ -774,7 +774,7 @@ def get_client_counts(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/buildings", response_model=List[dict], tags=["Buildings"])
-def get_buildings(db: Session = Depends(get_wireless_db)):
+def get_buildings(db: Session = Depends(get_wireless_db_dep)):
     """Get list of buildings with their details."""
     try:
         logger.info("Fetching list of buildings")
@@ -792,7 +792,7 @@ def get_buildings(db: Session = Depends(get_wireless_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/floors/{building_id}", response_model=List[dict], tags=["Floors"])
-def get_floors(building_id: int, db: Session = Depends(get_wireless_db)):
+def get_floors(building_id: int, db: Session = Depends(get_wireless_db_dep)):
     """Get floors for a specific building."""
     try:
         floors = db.query(Floor).filter_by(buildingid=building_id).all()
@@ -810,7 +810,7 @@ def get_floors(building_id: int, db: Session = Depends(get_wireless_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/rooms/{floor_id}", response_model=List[dict], tags=["Rooms"])
-def get_rooms(floor_id: int, db: Session = Depends(get_wireless_db)):
+def get_rooms(floor_id: int, db: Session = Depends(get_wireless_db_dep)):
     """Get rooms for a specific floor."""
     try:
         rooms = db.query(Room).filter_by(floorid=floor_id).all()
@@ -827,7 +827,7 @@ def get_rooms(floor_id: int, db: Session = Depends(get_wireless_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/radio-types", response_model=List[dict], tags=["Radio Types"])
-def get_radio_types(db: Session = Depends(get_wireless_db)):
+def get_radio_types(db: Session = Depends(get_wireless_db_dep)):
     """Get all radio types."""
     try:
         radio_types = db.query(RadioType).all()
@@ -843,7 +843,7 @@ def get_radio_types(db: Session = Depends(get_wireless_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/wireless/campuses/", response_model=CampusResponse)
-def create_campus(campus: CampusCreate, db: Session = Depends(get_wireless_db)):
+def create_campus(campus: CampusCreate, db: Session = Depends(get_wireless_db_dep)):
     """Create a new campus."""
     db_campus = Campus(campus_name=campus.campus_name)
     db.add(db_campus)
@@ -852,12 +852,12 @@ def create_campus(campus: CampusCreate, db: Session = Depends(get_wireless_db)):
     return db_campus
 
 @app.get("/wireless/campuses/", response_model=List[CampusResponse])
-def get_campuses(db: Session = Depends(get_wireless_db)):
+def get_campuses(db: Session = Depends(get_wireless_db_dep)):
     """Get all campuses."""
     return db.query(Campus).all()
 
 @app.post("/wireless/buildings/", response_model=BuildingResponse)
-def create_building(building: BuildingCreate, db: Session = Depends(get_wireless_db)):
+def create_building(building: BuildingCreate, db: Session = Depends(get_wireless_db_dep)):
     """Create a new building."""
     db_building = Building(**building.dict())
     db.add(db_building)
@@ -866,7 +866,7 @@ def create_building(building: BuildingCreate, db: Session = Depends(get_wireless
     return db_building
 
 @app.get("/wireless/buildings/", response_model=List[BuildingResponse])
-def get_wireless_buildings(campus_id: Optional[int] = None, db: Session = Depends(get_wireless_db)):
+def get_wireless_buildings(campus_id: Optional[int] = None, db: Session = Depends(get_wireless_db_dep)):
     """Get all buildings, optionally filtered by campus."""
     query = db.query(Building)
     if campus_id:
@@ -874,7 +874,7 @@ def get_wireless_buildings(campus_id: Optional[int] = None, db: Session = Depend
     return query.all()
 
 @app.post("/wireless/client-counts/", response_model=ClientCountResponse)
-def create_client_count(count: ClientCountCreate, db: Session = Depends(get_wireless_db)):
+def create_client_count(count: ClientCountCreate, db: Session = Depends(get_wireless_db_dep)):
     """Create a new client count."""
     db_count = ClientCount(**count.dict())
     db.add(db_count)
@@ -887,7 +887,7 @@ def get_wireless_client_counts(
     building_id: Optional[int] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    db: Session = Depends(get_wireless_db)
+    db: Session = Depends(get_wireless_db_dep)
 ):
     """Get client counts with optional filters."""
     query = db.query(ClientCount)

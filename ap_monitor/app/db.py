@@ -110,6 +110,14 @@ def get_apclient_db_dep():
     finally:
         db.close()
 
+def get_wireless_db_dep():
+    """FastAPI dependency for getting wireless_count DB session (generator, not context manager)."""
+    db = WirelessSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 def init_db():
     """Initialize databases by creating tables."""
     try:
@@ -144,5 +152,6 @@ __all__ = [
     'get_wireless_db_session',
     'get_apclient_db_session',
     'get_apclient_db_dep',
+    'get_wireless_db_dep',
     'init_db'
 ]

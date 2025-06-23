@@ -29,6 +29,7 @@ from ap_monitor.app.main import (
 )
 from apscheduler.triggers.cron import CronTrigger
 from ap_monitor.app.dna_api import fetch_ap_client_data_with_fallback
+from urllib.error import HTTPError
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -406,6 +407,23 @@ def test_update_client_count_task(mock_auth, client, override_get_db_with_mock_c
     except Exception as e:
         logger.error(f"Error in client count update test: {e}")
         raise
+
+def raise_http_500(*args, **kwargs):
+    from urllib.error import HTTPError
+    raise HTTPError(url=None, code=500, msg="Internal Server Error", hdrs=None, fp=None)
+
+def test_update_ap_data_task_retries_on_maintenance(monkeypatch, caplog):
+    # Patch time.sleep to avoid real waiting
+    monkeypatch.setattr("time.sleep", lambda x: None)
+    # Patch db session
+    mock_db = Mock()
+    # Run the task with the mock fetch_ap_data_func that always raises HTTP 500
+    with caplog.at_level("ERROR"):
+        update_ap_data_task(db=mock_db, fetch_ap_data_func=raise_http_500)
+    # Check that the error and retry messages are in the logs
+    error_logs = [r for r in caplog.records if "Maintenance window" in r.message]
+    assert len(error_logs) == 4  # Should log for all 4 attempts (0,1,2,3)
+    assert any("Max retries reached" in r.message for r in caplog.records)
 
 @patch("ap_monitor.app.main.auth_manager")
 def test_update_ap_data_task(mock_auth, client, override_get_db_with_mock_aps):

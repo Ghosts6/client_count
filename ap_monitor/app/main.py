@@ -12,6 +12,8 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
 import os
 from zoneinfo import ZoneInfo  # Python 3.9+
+import time
+from urllib.error import HTTPError
 
 from ap_monitor.app.db import (
     get_wireless_db,
@@ -53,64 +55,8 @@ from .diagnostics import (
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
-def get_database_url():
-    if os.getenv("TESTING", "false").lower() == "true":
-        return "sqlite:///:memory:"
-    return "postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}".format(
-        DB_USER=os.getenv("DB_USER", "postgres"),
-        DB_PASSWORD=os.getenv("DB_PASSWORD"),
-        DB_HOST=os.getenv("DB_HOST", "localhost"),
-        DB_PORT=os.getenv("DB_PORT", "3306"),
-        DB_NAME=os.getenv("DB_NAME", "wireless_count")
-    )
-
-# Dynamically determine DATABASE_URL
-DATABASE_URL = get_database_url()
-
 # Set up logging first
 logger = setup_logging()
-
-# Log the database URL being used
-logger.info(f"Using DATABASE_URL: {DATABASE_URL}")
-
-def initialize_database():
-    global engine, TestingSessionLocal
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    
-    # Initialize both databases only in non-test mode
-    if os.getenv("TESTING", "false").lower() != "true":
-        # Create wireless_count tables
-        WirelessBase.metadata.create_all(bind=engine)
-        logger.info("Wireless count database tables created successfully")
-        
-        # Create apclientcount tables
-        APClientBase.metadata.create_all(bind=apclient_engine)
-        logger.info("AP client count database tables created successfully")
-    # Ensure apclientcount tables exist in test mode
-    elif os.getenv("TESTING", "false").lower() == "true":
-        APClientBase.metadata.create_all(bind=apclient_engine)
-        logger.info("Test AP client count database tables created successfully")
-
-# Initialize database engine and session factory
-engine = None
-TestingSessionLocal = None
-
-# Initialize apclientcount database only in non-test mode
-if os.getenv("TESTING", "false").lower() != "true":
-    APCLIENT_DB_URL = os.getenv("APCLIENT_DB_URL", "postgresql://postgres:@localhost:3306/apclientcount")
-    apclient_engine = create_engine(APCLIENT_DB_URL)
-    ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
-else:
-    # In test mode, use the same in-memory database for both
-    from sqlalchemy import create_engine
-    apclient_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    ApclientSessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=apclient_engine))
-    # Ensure apclientcount tables exist immediately
-    APClientBase.metadata.create_all(bind=apclient_engine)
-
-# Reinitialize the database engine and session factory
-initialize_database()
 
 # Initialize scheduler
 scheduler = BackgroundScheduler(
@@ -162,7 +108,6 @@ async def lifespan(app: FastAPI):
         # Initialize database
         logger.info("Initializing database...")
         init_db()
-        initialize_database()  # Initialize both databases
         logger.info("Database initialized successfully")
 
         # Initialize radio table if empty
@@ -288,16 +233,14 @@ def parse_location(location: str) -> tuple:
 
     return building, floor
 
-def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None):
-    """Background task to update AP data in the database."""
+def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None, retries=0):
+    """Background task to update AP data in the database, with retry on maintenance errors."""
     auth_manager_obj = auth_manager_obj or auth_manager
     fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
-    if db is None:
-        db = get_apclient_db_session()  # Use session function instead of context manager
-        close_db = True
+    MAX_RETRIES = 3
     try:
-        logger.info("Running scheduled task: update_ap_data_task")
+        logger.info(f"Running scheduled task: update_ap_data_task (retry {retries})")
         logger.debug(f"Database session being used: {db}")
         now = datetime.now(timezone.utc)
         rounded_unix_timestamp = int(now.timestamp() * 1000)
@@ -386,8 +329,22 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         db.commit()
         logger.info("AP data updated successfully in apclientcount DB")
         
+    except HTTPError as e:
+        if e.code in (404, 500):
+            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Sleeping for 30 minutes before retry.")
+            if retries < MAX_RETRIES:
+                time.sleep(1800)  # 30 minutes
+                update_ap_data_task(db=None, auth_manager_obj=auth_manager_obj, fetch_ap_data_func=fetch_ap_data_func, retries=retries+1)
+                return
+            else:
+                logger.error(f"Max retries reached for update_ap_data_task. Skipping this run.")
+        if db:
+            db.rollback()
+        logger.error(f"Error updating AP data: {e}")
+        # Do not re-raise, just log and continue to reschedule
     except Exception as e:
-        db.rollback()
+        if db:
+            db.rollback()
         logger.error(f"Error updating AP data: {e}")
         raise  # Re-raise to trigger scheduler's error handling
     finally:
@@ -396,10 +353,11 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         next_run = calculate_next_run_time()
         reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
 
-def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None, wireless_db=None):
-    """Update client count data from DNA Center API."""
+def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None, wireless_db=None, retries=0):
+    """Update client count data from DNA Center API, with retry on maintenance errors."""
     close_db = False
     close_wireless_db = False
+    MAX_RETRIES = 3
     try:
         # Get database sessions if not provided
         if db is None:
@@ -585,6 +543,21 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         db.commit()
         wireless_db.commit()
         logger.info("Client count data updated successfully in both databases")
+    except HTTPError as e:
+        if e.code in (404, 500):
+            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Sleeping for 30 minutes before retry.")
+            if retries < MAX_RETRIES:
+                time.sleep(1800)  # 30 minutes
+                update_client_count_task(db=None, auth_manager_obj=auth_manager_obj, fetch_client_counts_func=fetch_client_counts_func, fetch_ap_data_func=fetch_ap_data_func, wireless_db=None, retries=retries+1)
+                return
+            else:
+                logger.error(f"Max retries reached for update_client_count_task. Skipping this run.")
+        if db:
+            db.rollback()
+        if wireless_db:
+            wireless_db.rollback()
+        logger.error(f"Error updating client count data: {str(e)}")
+        # Do not re-raise, just log and continue to reschedule
     except Exception as e:
         if db:
             db.rollback()
@@ -1203,7 +1176,7 @@ async def startup_event():
     
     # Initialize database
     logger.info("Initializing database...")
-    initialize_database()
+    init_db()
     
     # Initialize scheduler
     logger.info("Initializing scheduler...")

@@ -1,4 +1,3 @@
-print('DEBUG: ap_monitor.app.db module loaded')
 import logging
 import os
 from sqlalchemy import create_engine

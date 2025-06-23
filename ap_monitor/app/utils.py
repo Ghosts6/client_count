@@ -3,6 +3,7 @@ import os
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import gzip
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
@@ -12,11 +13,23 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "ap-monitor.log")
     
+    def namer(name):
+        return name + ".gz"
+
+    def rotator(source, dest):
+        with open(source, "rb") as sf, gzip.open(dest, "wb") as df:
+            df.writelines(sf)
+        os.remove(source)
+
+    handler = TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=14)
+    handler.namer = namer
+    handler.rotator = rotator
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=30),
+            handler,
             logging.StreamHandler()
         ]
     )

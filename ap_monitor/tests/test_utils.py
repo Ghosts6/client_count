@@ -18,7 +18,7 @@ def test_setup_logging(mock_StreamHandler, mock_basicConfig, mock_TimedRotatingF
 
     mock_makedirs.assert_called_once_with("Logs", exist_ok=True)
     mock_TimedRotatingFileHandler.assert_called_once_with(
-        "Logs/ap-monitor.log", when="D", interval=1, backupCount=30
+        "Logs/ap-monitor.log", when="D", interval=1, backupCount=14
     )
     mock_basicConfig.assert_called_once_with(
         level=logging.INFO,

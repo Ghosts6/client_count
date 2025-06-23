@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 import ap_monitor.app.db  # Ensure db module is loaded so attributes exist for monkeypatching
-print('DEBUG ap_monitor.app.db attributes:', dir(ap_monitor.app.db))
 
 from ap_monitor.app.models import (
     AccessPoint, ClientCount, Building, Floor, Campus,

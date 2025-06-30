@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 from ap_monitor.app.db import APClientSessionLocal
 from ap_monitor.app.utils import setup_logging
+from ap_monitor.app.diagnostics import save_incomplete_diagnostics_from_list
 
 # Load environment variables
 load_dotenv()
@@ -694,32 +695,161 @@ def fetch_network_devices(auth_manager, retries=3):
 
 def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
     """
-    Try to fetch AP/client data using the new endpoints, falling back as needed.
-    Returns a dict with 'source' and 'data'.
+    Fetch AP/client data using prioritized, extensible multi-API fallback and merging.
+    For each AP/device, merge data from all APIs as needed, filling missing fields from fallback APIs in order.
+    Returns a list of dicts, each with a 'status' field and a 'source_map' showing which API provided each field.
+    Aggressively attempts to fill missing required fields, logs incomplete devices, and ensures Grafana-required fields are present.
     """
-    # 1. Try network devices (APs with client counts)
-    ap_data = fetch_network_devices(auth_manager, retries)
-    if ap_data:
-        logger.info(f"Fetched AP data from networkDevices endpoint: {len(ap_data)} records.")
-        return {'source': 'networkDevices', 'data': ap_data}
-    # 2. Try clients endpoint (aggregate by AP)
-    clients = fetch_clients(auth_manager, retries)
-    if clients:
-        logger.info(f"Fetched client data from clients endpoint: {len(clients)} records.")
-        return {'source': 'clients', 'data': clients}
-    # 3. Try site health summaries
-    site_health = fetch_site_health_summaries(auth_manager, retries)
-    if site_health:
-        logger.info(f"Fetched site health summaries: {len(site_health)} records.")
-        return {'source': 'siteHealthSummaries', 'data': site_health}
-    # 4. Try clients/count for a specific site if site_id is provided
-    if site_id:
-        count = fetch_clients_count_by_site(auth_manager, site_id, retries)
-        if count:
-            logger.info(f"Fetched client count for site {site_id} from clients/count endpoint.")
-            return {'source': 'clients/count', 'data': count}
-    logger.error("All new API endpoint fetches failed or returned empty data.")
-    return {'source': 'none', 'data': []}
+    # Define required and non-critical fields
+    required_fields = ['macAddress', 'name', 'location', 'clientCount']
+    non_critical_fields = ['model', 'status', 'ipAddress']
+    all_fields = required_fields + non_critical_fields
+    # List of API fetch functions in order of preference
+    api_fetchers = [
+        ('networkDevices', fetch_network_devices),
+        ('clients', fetch_clients),
+        ('siteHealthSummaries', fetch_site_health_summaries),
+        ('clients/count', lambda am, r: [fetch_clients_count_by_site(am, site_id, r)] if site_id else []),
+    ]
+    # Helper: extract fields from each API's record
+    def extract_fields(api_name, record):
+        if api_name == 'networkDevices':
+            return {
+                'macAddress': record.get('macAddress'),
+                'name': record.get('hostname') or record.get('name'),
+                'location': record.get('location') or record.get('snmpLocation') or record.get('locationName'),
+                'clientCount': record.get('clientCount', record.get('clients', None)),
+                'model': record.get('model') or record.get('platformId'),
+                'status': record.get('reachabilityStatus', record.get('reachabilityHealth')),
+                'ipAddress': record.get('managementIpAddress', record.get('ipAddress')),
+                'raw': record
+            }
+        elif api_name == 'clients':
+            return {
+                'macAddress': record.get('connectedNetworkDeviceMacAddress'),
+                'name': record.get('connectedNetworkDeviceName'),
+                'location': record.get('siteHierarchy'),
+                'clientCount': 1,  # Each client record represents one client
+                'model': None,
+                'status': None,
+                'ipAddress': None,
+                'raw': record
+            }
+        elif api_name == 'siteHealthSummaries':
+            return {
+                'macAddress': None,
+                'name': record.get('siteName'),
+                'location': record.get('siteName'),
+                'clientCount': record.get('numberOfClients', 0),
+                'model': None,
+                'status': None,
+                'ipAddress': None,
+                'raw': record
+            }
+        elif api_name == 'clients/count':
+            return {
+                'macAddress': None,
+                'name': 'Unknown',
+                'location': 'Unknown',
+                'clientCount': record.get('count', 0),
+                'model': None,
+                'status': None,
+                'ipAddress': None,
+                'raw': record
+            }
+        return {}
+    # Step 1: Gather all data from all APIs
+    all_records = {}
+    for api_name, fetcher in api_fetchers:
+        try:
+            api_data = fetcher(auth_manager, retries)
+            if not api_data:
+                continue
+            for rec in api_data:
+                fields = extract_fields(api_name, rec)
+                mac = fields['macAddress']
+                # Use MAC as primary key if available, else use name/location
+                key = mac or (fields['name'], fields['location'])
+                if not key:
+                    continue
+                if key not in all_records:
+                    all_records[key] = {'source_map': {}, 'fields': {}, 'raws': {}, 'api_counts': {}}
+                for f in all_fields:
+                    val = fields.get(f)
+                    if val is not None:
+                        # For clientCount, sum if from clients API
+                        if f == 'clientCount' and api_name == 'clients':
+                            prev = all_records[key]['fields'].get(f, 0)
+                            all_records[key]['fields'][f] = prev + 1
+                        else:
+                            all_records[key]['fields'][f] = val
+                        all_records[key]['source_map'][f] = api_name
+                        all_records[key]['raws'][api_name] = rec
+                        all_records[key]['api_counts'][api_name] = all_records[key]['api_counts'].get(api_name, 0) + 1
+        except Exception as e:
+            logger.warning(f"Error fetching from {api_name}: {e}")
+            continue
+    # Step 2: Aggressively fill missing required fields from all APIs
+    diagnostics_incomplete = []
+    results = []
+    for key, data in all_records.items():
+        fields = data['fields']
+        source_map = data['source_map']
+        # Aggressively try to fill missing required fields from any available API
+        missing_required = [f for f in required_fields if not fields.get(f)]
+        if missing_required:
+            # Try to fill from any other API's raw data
+            for f in missing_required:
+                for api_name, raw in data['raws'].items():
+                    val = extract_fields(api_name, raw).get(f)
+                    if val:
+                        fields[f] = val
+                        source_map[f] = api_name
+                        missing_required = [ff for ff in required_fields if not fields.get(ff)]
+                        if not missing_required:
+                            break
+                if not missing_required:
+                    break
+        # After aggressive fill, check again
+        missing_required = [f for f in required_fields if not fields.get(f)]
+        if not missing_required:
+            status = 'ok' if all(source_map.get(f) == 'networkDevices' for f in required_fields if f in source_map) else 'fallback'
+        else:
+            status = 'incomplete'
+            diagnostics_incomplete.append({
+                'key': key,
+                'missing_fields': missing_required,
+                'fields': {f: fields.get(f) for f in all_fields},
+                'source_map': source_map,
+                'raws': data['raws']
+            })
+        merged = {f: fields.get(f) for f in all_fields}
+        merged['status'] = status
+        merged['source_map'] = source_map
+        merged['raws'] = data['raws']
+        merged['missing_required'] = missing_required
+        results.append(merged)
+    # Step 3: If no results, try siteHealthSummaries or clients/count as last resort
+    if not results:
+        site_health = fetch_site_health_summaries(auth_manager, retries)
+        for site in site_health:
+            results.append({
+                'macAddress': None,
+                'name': site.get('siteName'),
+                'location': site.get('siteName'),
+                'clientCount': site.get('numberOfClients', 0),
+                'model': None,
+                'status': 'siteHealth',
+                'ipAddress': None,
+                'source_map': {'clientCount': 'siteHealthSummaries'},
+                'raws': {'siteHealthSummaries': site},
+                'missing_required': ['macAddress']
+            })
+    # Log diagnostics for incomplete APs/devices
+    if diagnostics_incomplete:
+        logger.warning(f"{len(diagnostics_incomplete)} APs/devices are incomplete and may need further data recovery. See diagnostics_incomplete for details.")
+        save_incomplete_diagnostics_from_list(diagnostics_incomplete)
+    return results
 
 def update_ap_data_task_with_fallback(auth_manager):
     """Update AP data using AP and client data, with fallback location logic."""

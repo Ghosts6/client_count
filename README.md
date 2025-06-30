@@ -157,7 +157,7 @@ Bring up the new service:
 sudo systemctl daemon-reload
 sudo systemctl enable ap_monitor.service
 sudo systemctl start ap_monitor.service
-sudo systemctl status ap_monitor.service   # Verify it’s running
+sudo systemctl status ap_monitor.service   # Verify it's running
 ```
 
 ---
@@ -176,38 +176,106 @@ createdb -h localhost -p 3306 -U postgres wireless_count
 
 ### **Health Check**
 
-- **Endpoint**: `GET /`
+- **Endpoint**: `GET /health`
 - **Description**: Returns the health status of the application.
+- **Example:**
+```bash
+curl -i http://localhost:8000/health
+```
 
 ### **Update AP Data**
 
-- **Endpoint**: `POST /update-aps`
+- **Endpoint**: `POST /tasks/update-ap-data/`
 - **Description**: Manually triggers an update of AP data from the DNA Center API.
+- **Example:**
+```bash
+curl -X POST http://localhost:8000/tasks/update-ap-data/
+```
 
 ### **Update Client Count Data**
 
-- **Endpoint**: `POST /update-client-counts`
+- **Endpoint**: `POST /tasks/update-client-count/`
 - **Description**: Manually triggers an update of client count data from the DNA Center API.
+- **Example:**
+```bash
+curl -X POST http://localhost:8000/tasks/update-client-count/
+```
 
 ### **List AP Data**
 
 - **Endpoint**: `GET /aps`
 - **Description**: Retrieves all AP data from the database. Supports query parameters for filtering.
+- **Example:**
+```bash
+curl -i http://localhost:8000/aps
+```
 
 ### **List Client Count Data**
 
 - **Endpoint**: `GET /client-counts`
 - **Description**: Retrieves client count data from the database with optional filters.
+- **Example:**
+```bash
+curl -i http://localhost:8000/client-counts
+```
 
 ### **List Buildings**
 
 - **Endpoint**: `GET /buildings`
 - **Description**: Retrieves a list of unique buildings from the client count data.
+- **Example:**
+```bash
+curl -i http://localhost:8000/buildings
+```
+
+### **Diagnostics**
+
+- **Purpose**: Provides advanced diagnostics and troubleshooting endpoints for AP and client count data quality, zero-counts, and incomplete device records. Only available if `ENABLE_DIAGNOSTICS=true`.
+
+#### **Zero Count Diagnostics**
+
+- **Endpoint**: `GET /diagnostics/zero-counts`
+- **Description**: Returns diagnostics for buildings with zero client counts and potential issues.
+- **Example:**
+```bash
+curl -i http://localhost:8000/diagnostics/zero-counts
+```
+
+#### **Building Health Alerts**
+
+- **Endpoint**: `GET /diagnostics/health`
+- **Description**: Returns health monitoring alerts for buildings (e.g., sudden drops in client count).
+- **Example:**
+```bash
+curl -i http://localhost:8000/diagnostics/health
+```
+
+#### **Comprehensive Diagnostic Report**
+
+- **Endpoint**: `GET /diagnostics/report`
+- **Description**: Returns a comprehensive diagnostic report including zero count analysis and health monitoring.
+- **Example:**
+```bash
+curl -i http://localhost:8000/diagnostics/report
+```
+
+#### **Incomplete Devices Diagnostics**
+
+- **Endpoint**: `GET /diagnostics/incomplete-devices`
+- **Description**: Returns a list of APs/devices with missing required fields (incomplete records) and their details.
+- **Example:**
+```bash
+curl -i http://localhost:8000/diagnostics/incomplete-devices
+```
 
 ### **OpenAPI Documentation**
 
 - **Endpoint**: `GET /openapi.json` and `/docs`
 - **Description**: Returns the OpenAPI schema and interactive API docs.
+- **Example:**
+```bash
+curl -i http://localhost:8000/openapi.json
+```
 
 ---
 

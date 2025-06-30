@@ -3,7 +3,9 @@ import os
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, and_
 from .models import Building, Campus, ClientCount, ApBuilding, AccessPoint, ClientCountAP
-from .dna_api import fetch_ap_data, AuthManager
+import json
+from logging.handlers import TimedRotatingFileHandler
+import gzip
 
 # Configure diagnostics logger
 diagnostics_logger = logging.getLogger('diagnostics')
@@ -15,14 +17,22 @@ os.makedirs(log_dir, exist_ok=True)
 
 # Configure file handler for diagnostics
 diagnostics_file = os.path.join(log_dir, 'diagnostics.log')
-file_handler = logging.FileHandler(diagnostics_file)
-file_handler.setLevel(logging.INFO)
 
-# Create formatter and add it to the handler
+def gz_namer(name):
+    return name + ".gz"
+
+def gz_rotator(source, dest):
+    with open(source, "rb") as sf, gzip.open(dest, "wb") as df:
+        df.writelines(sf)
+    os.remove(source)
+
+file_handler = TimedRotatingFileHandler(diagnostics_file, when="D", interval=1, backupCount=7)
+file_handler.namer = gz_namer
+file_handler.rotator = gz_rotator
+file_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
-
-# Add the handler to the logger
+diagnostics_logger.handlers = []
 diagnostics_logger.addHandler(file_handler)
 
 # Main logger for other operations
@@ -75,6 +85,9 @@ def analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager):
     """
     if not is_diagnostics_enabled():
         return {"message": "Diagnostics are not enabled"}
+
+    # Import here to avoid circular import
+    from .dna_api import fetch_ap_data
 
     report = {
         "timestamp": datetime.now(timezone.utc),
@@ -219,6 +232,9 @@ def generate_diagnostic_report(wireless_db, apclient_db, auth_manager):
     if not is_diagnostics_enabled():
         return {"message": "Diagnostics are not enabled"}
 
+    # Import here to avoid circular import
+    from .dna_api import AuthManager
+
     zero_count_analysis = analyze_zero_count_buildings(wireless_db, apclient_db, auth_manager)
     health_alerts = monitor_building_health(wireless_db, apclient_db, auth_manager)
 
@@ -237,3 +253,26 @@ def generate_diagnostic_report(wireless_db, apclient_db, auth_manager):
     log_diagnostic_report(report)
 
     return report 
+
+# --- Incomplete diagnostics file management ---
+incomplete_json_file = os.path.join(log_dir, 'diagnostics_incomplete.json')
+
+def write_incomplete_diagnostics(diagnostics_incomplete):
+    try:
+        with open(incomplete_json_file, 'w') as f:
+            json.dump(diagnostics_incomplete, f, indent=2, default=str)
+    except Exception as e:
+        diagnostics_logger.error(f"Failed to write diagnostics_incomplete.json: {e}")
+
+def get_incomplete_diagnostics():
+    try:
+        with open(incomplete_json_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        diagnostics_logger.error(f"Failed to read diagnostics_incomplete.json: {e}")
+        return []
+
+# --- Patch for dna_api fallback logic to call this after each run ---
+def save_incomplete_diagnostics_from_list(diagnostics_incomplete):
+    if diagnostics_incomplete:
+        write_incomplete_diagnostics(diagnostics_incomplete) 

@@ -10,6 +10,10 @@ from ap_monitor.app.diagnostics import (
 )
 from ap_monitor.app.models import Building, Campus, ClientCount, ApBuilding, AccessPoint
 from ap_monitor.app.db import get_wireless_db, get_apclient_db
+from fastapi.testclient import TestClient
+from ap_monitor.app.main import app
+import tempfile
+import json
 
 @pytest.fixture(autouse=True)
 def reset_environment():
@@ -108,7 +112,7 @@ def test_diagnostics_disabled():
 
 def test_analyze_zero_count_buildings(mock_wireless_db, mock_apclient_db, mock_auth_manager, enable_diagnostics):
     """Test the zero count building analysis function with various scenarios."""
-    with patch('ap_monitor.app.diagnostics.fetch_ap_data') as mock_fetch:
+    with patch('ap_monitor.app.dna_api.fetch_ap_data') as mock_fetch:
         # Mock DNA Center API response with different scenarios
         mock_fetch.return_value = [
             {
@@ -177,7 +181,7 @@ def test_monitor_building_health(mock_wireless_db, mock_apclient_db, mock_auth_m
 
 def test_generate_diagnostic_report(mock_wireless_db, mock_apclient_db, mock_auth_manager, enable_diagnostics):
     """Test the comprehensive diagnostic report generation with various scenarios."""
-    with patch('ap_monitor.app.diagnostics.fetch_ap_data') as mock_fetch:
+    with patch('ap_monitor.app.dna_api.fetch_ap_data') as mock_fetch:
         # Mock DNA Center API response with mixed scenarios
         mock_fetch.return_value = [
             {
@@ -221,7 +225,7 @@ def test_diagnostics_with_missing_building(mock_wireless_db, mock_apclient_db, m
     mock_apclient_db.query.return_value.filter.return_value.first.return_value = None
     
     # Mock DNA Center API response
-    with patch('ap_monitor.app.diagnostics.fetch_ap_data') as mock_fetch:
+    with patch('ap_monitor.app.dna_api.fetch_ap_data') as mock_fetch:
         mock_fetch.return_value = [
             {
                 "location": "Test Building 1",
@@ -242,8 +246,8 @@ def test_diagnostics_with_missing_building(mock_wireless_db, mock_apclient_db, m
 
 def test_diagnostics_with_dna_center_error(mock_wireless_db, mock_apclient_db, mock_auth_manager, enable_diagnostics):
     """Test diagnostics when DNA Center API returns an error."""
-    with patch('ap_monitor.app.diagnostics.fetch_ap_data') as mock_fetch:
-        mock_fetch.side_effect = Exception("DNA Center API Error")
+    with patch('ap_monitor.app.dna_api.fetch_ap_data') as mock_fetch:
+        mock_fetch.side_effect = Exception("DNA Center API error")
         
         report = analyze_zero_count_buildings(
             mock_wireless_db,
@@ -271,3 +275,31 @@ def test_database_session_context_manager():
         result = apclient_db.query(ApBuilding).first()
         # If no records exist, the result will be None, but the session is still valid
         assert apclient_db is not None 
+
+def test_incomplete_devices_endpoint(enable_diagnostics, monkeypatch):
+    """Test the /diagnostics/incomplete-devices endpoint returns correct data and respects diagnostics flag."""
+    # Prepare a fake diagnostics_incomplete.json file
+    fake_data = [
+        {"key": "ap1", "missing_fields": ["macAddress"], "fields": {"name": "AP1"}},
+        {"key": "ap2", "missing_fields": ["location", "clientCount"], "fields": {"name": "AP2"}}
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Patch the incomplete_json_file path in diagnostics.py
+        incomplete_file = tmpdir + "/diagnostics_incomplete.json"
+        monkeypatch.setattr("ap_monitor.app.diagnostics.incomplete_json_file", incomplete_file)
+        with open(incomplete_file, 'w') as f:
+            json.dump(fake_data, f)
+        client = TestClient(app)
+        response = client.get("/diagnostics/incomplete-devices")
+        assert response.status_code == 200
+        data = response.json()
+        assert "incomplete_devices" in data
+        assert data["count"] == 2
+        assert data["incomplete_devices"][0]["key"] == "ap1"
+        assert data["incomplete_devices"][1]["key"] == "ap2"
+
+    # Test with diagnostics disabled
+    os.environ['ENABLE_DIAGNOSTICS'] = 'false'
+    client = TestClient(app)
+    response = client.get("/diagnostics/incomplete-devices")
+    assert response.status_code == 403 

@@ -24,7 +24,7 @@ def setup_logging():
     handler = TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=14)
     handler.namer = namer
     handler.rotator = rotator
-
+    
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",

@@ -609,25 +609,53 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
         if close_session:
             session.close()
 
-def fetch_clients(auth_manager, retries=3):
-    """Fetch all client devices from the DNA Center API."""
+def fetch_clients(auth_manager, retries=3, page_limit=100, max_clients=None, delay=1.0):
+    """
+    Fetch all client devices from the DNA Center API using pagination.
+    Args:
+        auth_manager: AuthManager instance
+        retries: Number of retries per request
+        page_limit: Number of clients per page (default 100)
+        max_clients: Optional max number of clients to fetch (None = all)
+        delay: Delay in seconds between requests
+    Returns:
+        List of all client records
+    """
     token = auth_manager.get_token()
     auth_headers = {'x-auth-token': token}
-    url = f"{BASE_URL}/dna/data/api/v1/clients"
-    attempt = 0
-    while attempt < retries:
-        try:
-            req = Request(url, headers=auth_headers)
-            with urlopen(req, context=ssl_context, timeout=60) as response:
-                data = json.load(response)
-                return data.get('response', [])
-        except Exception as e:
-            attempt += 1
-            logger.warning(f"Error fetching clients (attempt {attempt}): {e}")
-            if attempt >= retries:
-                logger.error(f"Failed to fetch clients after {retries} attempts: {e}")
-                return []
-            time.sleep(2 ** attempt)
+    offset = 0
+    all_clients = []
+    total_fetched = 0
+    while True:
+        params = {'limit': page_limit, 'offset': offset}
+        url = f"{BASE_URL}/dna/data/api/v1/clients?{urlencode(params)}"
+        attempt = 0
+        while attempt < retries:
+            try:
+                logger.info(f"Fetching clients: offset={offset}, limit={page_limit}")
+                req = Request(url, headers=auth_headers)
+                with urlopen(req, context=ssl_context, timeout=60) as response:
+                    data = json.load(response)
+                    clients = data.get('response', [])
+                    if not clients:
+                        logger.info(f"No more clients returned at offset {offset}.")
+                        return all_clients
+                    all_clients.extend(clients)
+                    total_fetched += len(clients)
+                    logger.info(f"Fetched {len(clients)} clients (total so far: {total_fetched})")
+                    if max_clients and total_fetched >= max_clients:
+                        logger.info(f"Reached max_clients={max_clients}, stopping fetch.")
+                        return all_clients[:max_clients]
+                    offset += page_limit
+                    time.sleep(delay)
+                    break  # Success, break retry loop
+            except Exception as e:
+                attempt += 1
+                logger.warning(f"Error fetching clients (attempt {attempt}) at offset {offset}: {e} (URL: {url})")
+                if attempt >= retries:
+                    logger.error(f"Failed to fetch clients after {retries} attempts at offset {offset}: {e}")
+                    return all_clients
+                time.sleep(2 ** attempt)
 
 
 def fetch_clients_count_by_site(auth_manager, site_id, retries=3):
@@ -761,7 +789,8 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
     # 4. All clients (for aggregation by AP if needed)
     all_clients = []
     try:
-        all_clients = fetch_clients(auth_manager, retries)
+        # Use paginated fetch_clients to avoid rate limits
+        all_clients = fetch_clients(auth_manager, retries=retries, page_limit=100, delay=1.0)
     except Exception as e:
         logger.warning(f"Error fetching all clients: {e}")
 
@@ -780,7 +809,6 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
         logger.warning(f"Error fetching planned APs: {e}")
 
     # --- Step 2: Build lookup tables for merging ---
-    # By MAC address, AP name, and location
     ap_by_mac = {ap.get('macAddress', '').upper(): ap for ap in ap_inventory if ap.get('macAddress')}
     health_by_mac = {ap.get('macAddress', '').upper(): ap for ap in ap_health if ap.get('macAddress')}
     planned_by_mac = {ap.get('attributes', {}).get('macAddress', '').upper(): ap for ap in planned_aps if ap.get('attributes', {}).get('macAddress')}
@@ -790,7 +818,7 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
         ap_mac = cc.get('macAddress', '') or cc.get('apMac', '')
         if ap_mac:
             client_count_by_ap[ap_mac.upper()] = cc.get('count', cc.get('clientCount', 0))
-    # Aggregate all clients by AP MAC
+    # Aggregate all clients by AP MAC (using paginated fetch_clients)
     clients_by_ap = {}
     for client in all_clients:
         ap_mac = client.get('apMac') or client.get('connectedNetworkDeviceMac')
@@ -842,7 +870,7 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
         if not merged['clientCount'] and mac in client_count_by_ap:
             merged['clientCount'] = client_count_by_ap[mac]
             source_map['clientCount'] = 'client_counts'
-        # 5. All clients (aggregate by AP)
+        # 5. All clients (aggregate by AP, using paginated fetch_clients)
         if not merged['clientCount'] and mac in clients_by_ap:
             merged['clientCount'] = len(clients_by_ap[mac])
             source_map['clientCount'] = 'all_clients'
@@ -853,7 +881,7 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
                     merged['clientCount'] = s.get('numberOfClients')
                     source_map['clientCount'] = 'site_health'
                     break
-        # 7. NEW: Fallback to /clients/count for this AP
+        # 7. Fallback: /clients/count for this AP (last resort)
         if not merged['clientCount']:
             count = fetch_clients_count_for_ap(auth_manager, mac=mac, name=merged.get('name'))
             debug_info['tried']['clients_count'] = True

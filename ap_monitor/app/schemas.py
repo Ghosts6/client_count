@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 from decimal import Decimal
@@ -12,9 +12,7 @@ class CampusCreate(CampusBase):
 
 class CampusResponse(CampusBase):
     campus_id: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class BuildingBase(BaseModel):
     building_name: str = Field(..., description="Name of the building")
@@ -27,9 +25,7 @@ class BuildingCreate(BuildingBase):
 
 class BuildingResponse(BuildingBase):
     building_id: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ClientCountBase(BaseModel):
     building_id: int = Field(..., description="ID of the building")
@@ -41,9 +37,7 @@ class ClientCountCreate(ClientCountBase):
 class ClientCountResponse(ClientCountBase):
     count_id: int
     time_inserted: datetime
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # AP Client Count Schemas
 class ApBuildingBase(BaseModel):
@@ -54,9 +48,7 @@ class ApBuildingCreate(ApBuildingBase):
 
 class ApBuildingResponse(ApBuildingBase):
     buildingid: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class FloorBase(BaseModel):
     floorname: str = Field(..., description="Name of the floor")
@@ -67,9 +59,7 @@ class FloorCreate(FloorBase):
 
 class FloorResponse(FloorBase):
     floorid: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class RoomBase(BaseModel):
     roomname: str = Field(..., description="Name of the room")
@@ -80,9 +70,7 @@ class RoomCreate(RoomBase):
 
 class RoomResponse(RoomBase):
     roomid: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class AccessPointBase(BaseModel):
     apname: str = Field(..., description="Name of the access point")
@@ -99,9 +87,7 @@ class AccessPointCreate(AccessPointBase):
 
 class AccessPointResponse(AccessPointBase):
     apid: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class RadioTypeBase(BaseModel):
     radioname: str = Field(..., description="Name of the radio type")
@@ -111,9 +97,7 @@ class RadioTypeCreate(RadioTypeBase):
 
 class RadioTypeResponse(RadioTypeBase):
     radioid: int
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ClientCountAPBase(BaseModel):
     apid: Optional[int] = Field(None, description="ID of the access point")
@@ -126,6 +110,4 @@ class ClientCountAPCreate(ClientCountAPBase):
 
 class ClientCountAPResponse(ClientCountAPBase):
     countid: int
-
-    class Config:
-        from_attributes = True 
+    model_config = ConfigDict(from_attributes=True)

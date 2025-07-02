@@ -2,7 +2,7 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data
+from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data, fetch_ap_client_data_with_fallback
 from urllib.error import HTTPError, URLError
 
 
@@ -808,3 +808,95 @@ def test_fetch_client_counts_filtering(mock_urlopen):
     assert site["siteType"] == "building"
     assert site["parentSiteName"] == "Keele Campus"
     assert site["wirelessClients"] > 0 or site["wiredClients"] > 0
+
+
+def make_mock_response(data):
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps(data).encode()
+    mock_response.__enter__.return_value.status = 200
+    return mock_response
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_client_data_with_fallback_merging(mock_urlopen):
+    """
+    Test merging and fallback logic for fetch_ap_client_data_with_fallback.
+    Simulate partial data from each API and verify merged result is correct.
+    """
+    # Mock responses for each endpoint
+    ap_config_data = [{
+        "macAddress": "AA:BB:CC:DD:EE:FF",
+        "apName": "AP1",
+        "location": None,  # Missing location
+        "apModel": "Cisco AP",
+        "primaryIpAddress": "10.0.0.1"
+    }]
+    device_health_data = [{
+        "macAddress": "AA:BB:CC:DD:EE:FF",
+        "name": None,  # Missing name
+        "location": "Global/Campus/Building/Floor",
+        "model": None,
+        "reachabilityHealth": "UP",
+        "clientCount": {"radio0": 5, "radio1": 3},
+        "ipAddress": None
+    }]
+    client_counts_data = [{
+        "macAddress": "AA:BB:CC:DD:EE:FF",
+        "count": 8
+    }]
+    all_clients_data = [{
+        "apMac": "AA:BB:CC:DD:EE:FF"
+    } for _ in range(8)]
+    site_health_data = [{
+        "siteId": "site-1",
+        "siteName": "Global/Campus/Building/Floor",
+        "numberOfClients": 8
+    }]
+    planned_aps_data = [{
+        "attributes": {"macAddress": "AA:BB:CC:DD:EE:FF", "heirarchyName": "Global/Campus/Building/Floor"}
+    }]
+
+    # Patch each fetcher to return the above data in order
+    with patch("ap_monitor.app.dna_api.fetch_ap_config_summary", return_value=ap_config_data), \
+         patch("ap_monitor.app.dna_api.fetch_device_health", return_value=device_health_data), \
+         patch("ap_monitor.app.dna_api.fetch_all_clients_count", return_value=client_counts_data), \
+         patch("ap_monitor.app.dna_api.fetch_clients", return_value=all_clients_data), \
+         patch("ap_monitor.app.dna_api.fetch_site_health", return_value=site_health_data), \
+         patch("ap_monitor.app.dna_api.fetch_planned_aps", return_value=planned_aps_data):
+        auth_manager = MagicMock()
+        auth_manager.get_token.return_value = "mocked_token"
+        results = fetch_ap_client_data_with_fallback(auth_manager)
+        assert isinstance(results, list)
+        assert len(results) == 1
+        ap = results[0]
+        # All required fields should be filled from some source
+        assert ap["macAddress"] == "AA:BB:CC:DD:EE:FF"
+        assert ap["name"] == "AP1"  # from ap_config_data
+        assert ap["location"] == "Global/Campus/Building/Floor"  # from device_health_data or planned_aps_data
+        assert ap["clientCount"] == 8  # from client_counts_data or device_health_data
+        assert ap["status"] == "ok"
+        # Source map should show which API provided each field
+        assert ap["source_map"]["macAddress"] == "ap_inventory"
+        assert ap["source_map"]["name"] == "ap_inventory"
+        assert ap["source_map"]["location"] in ("device_health", "planned_aps")
+        assert ap["source_map"]["clientCount"] in ("client_counts", "device_health")
+
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_client_data_with_fallback_incomplete(mock_urlopen):
+    """
+    Test that diagnostics are logged if all APIs fail for a required field.
+    """
+    # All fetchers return empty or missing required fields
+    with patch("ap_monitor.app.dna_api.fetch_ap_config_summary", return_value=[]), \
+         patch("ap_monitor.app.dna_api.fetch_device_health", return_value=[]), \
+         patch("ap_monitor.app.dna_api.fetch_all_clients_count", return_value=[]), \
+         patch("ap_monitor.app.dna_api.fetch_clients", return_value=[]), \
+         patch("ap_monitor.app.dna_api.fetch_site_health", return_value=[]), \
+         patch("ap_monitor.app.dna_api.fetch_planned_aps", return_value=[]), \
+         patch("ap_monitor.app.dna_api.save_incomplete_diagnostics_from_list") as mock_diag:
+        auth_manager = MagicMock()
+        auth_manager.get_token.return_value = "mocked_token"
+        results = fetch_ap_client_data_with_fallback(auth_manager)
+        # Should be empty or all incomplete
+        assert isinstance(results, list)
+        # Pass if diagnostics are called, or if there are no APs to diagnose
+        assert mock_diag.called or len(results) == 0

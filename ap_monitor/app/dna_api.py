@@ -30,6 +30,9 @@ NETWORK_DEVICE_URL = BASE_URL + "/dna/intent/api/v1/network-device"
 SITE_MEMBERSHIP_URL = BASE_URL + "/dna/intent/api/v1/membership/{siteId}"
 KEELE_CAMPUS_SITE_ID = 'e77b6e96-3cd3-400a-9ebd-231c827fd369'
 
+# Add at the top, after loading env
+SITE_HIERARCHY = os.getenv("DNA_SITE_HIERARCHY", "Global/Keele Campus")
+
 # Mapping of radio keys to radio IDs
 radio_id_map = {'radio0': 1, 'radio1': 2, 'radio2': 3}
 
@@ -609,30 +612,37 @@ def insert_apclientcount_data(device_info_list, timestamp, session=None):
         if close_session:
             session.close()
 
-def fetch_clients(auth_manager, retries=3, page_limit=100, max_clients=None, delay=1.0):
+def fetch_clients(auth_manager, retries=3, page_limit=100, max_clients=None, delay=1.0, site_id=None, site_hierarchy=None):
     """
-    Fetch all client devices from the DNA Center API using pagination.
+    Fetch all client devices from the DNA Center API using pagination and required filter.
+    Always uses siteHierarchy (not siteId) for filtering, as required by DNAC instance.
     Args:
         auth_manager: AuthManager instance
         retries: Number of retries per request
         page_limit: Number of clients per page (default 100)
         max_clients: Optional max number of clients to fetch (None = all)
         delay: Delay in seconds between requests
+        site_hierarchy: Site hierarchy string (default: Global/Keele Campus)
     Returns:
         List of all client records
     """
+    if site_id:
+        logger.warning("siteId is ignored for /clients endpoint; using siteHierarchy instead.")
+    if not site_hierarchy:
+        site_hierarchy = SITE_HIERARCHY
     token = auth_manager.get_token()
     auth_headers = {'x-auth-token': token}
-    offset = 0
+    offset = 1  # 1-based offset per API doc
     all_clients = []
     total_fetched = 0
+    filter_param = {'siteHierarchy': site_hierarchy}
     while True:
-        params = {'limit': page_limit, 'offset': offset}
+        params = {**filter_param, 'limit': page_limit, 'offset': offset}
         url = f"{BASE_URL}/dna/data/api/v1/clients?{urlencode(params)}"
         attempt = 0
         while attempt < retries:
             try:
-                logger.info(f"Fetching clients: offset={offset}, limit={page_limit}")
+                logger.info(f"Fetching clients: offset={offset}, limit={page_limit}, filter={filter_param}")
                 req = Request(url, headers=auth_headers)
                 with urlopen(req, context=ssl_context, timeout=60) as response:
                     data = json.load(response)
@@ -646,7 +656,7 @@ def fetch_clients(auth_manager, retries=3, page_limit=100, max_clients=None, del
                     if max_clients and total_fetched >= max_clients:
                         logger.info(f"Reached max_clients={max_clients}, stopping fetch.")
                         return all_clients[:max_clients]
-                    offset += page_limit
+                    offset += page_limit  # increment by page_limit, 1-based
                     time.sleep(delay)
                     break  # Success, break retry loop
             except Exception as e:
@@ -657,6 +667,69 @@ def fetch_clients(auth_manager, retries=3, page_limit=100, max_clients=None, del
                     return all_clients
                 time.sleep(2 ** attempt)
 
+# Global throttle for /clients/count (100 requests/minute)
+import threading
+_last_clients_count_time = [0.0]
+_clients_count_lock = threading.Lock()
+def throttle_clients_count():
+    import time
+    with _clients_count_lock:
+        now = time.time()
+        elapsed = now - _last_clients_count_time[0]
+        min_interval = 60.0 / 100.0  # 100 req/min
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        _last_clients_count_time[0] = time.time()
+
+def fetch_clients_count_for_ap(auth_manager, mac=None, name=None, site_id=None, site_hierarchy=None, retries=3, delay=1.0, backoff_factor=2.0):
+    """
+    Fetch client count for a specific AP using /clients/count with macAddress or connectedNetworkDeviceName, always including siteHierarchy.
+    Implements delay and exponential backoff for 429 errors.
+    Throttles globally to stay under 100 requests/minute.
+    Returns the count if found, else None. Logs the raw response for debugging.
+    """
+    if site_id:
+        logger.warning("siteId is ignored for /clients/count endpoint; using siteHierarchy instead.")
+    if not site_hierarchy:
+        site_hierarchy = SITE_HIERARCHY
+    token = auth_manager.get_token()
+    auth_headers = {'x-auth-token': token}
+    params = {'siteHierarchy': site_hierarchy}
+    if mac:
+        params['macAddress'] = mac
+    if name:
+        params['connectedNetworkDeviceName'] = name
+    url = f"{BASE_URL}/dna/data/api/v1/clients/count?{urlencode(params)}"
+    attempt = 0
+    current_delay = delay
+    while attempt < retries:
+        throttle_clients_count()
+        try:
+            req = Request(url, headers=auth_headers)
+            with urlopen(req, context=ssl_context, timeout=30) as response:
+                data = json.load(response)
+                logger.debug(f"/clients/count response for AP {mac or name}: {data}")
+                if isinstance(data, dict) and 'response' in data and 'count' in data['response']:
+                    return data['response']['count']
+                elif isinstance(data, dict) and 'count' in data:
+                    return data['count']
+                else:
+                    logger.warning(f"Unexpected /clients/count response for AP {mac or name}: {data}")
+                    return None
+        except HTTPError as e:
+            if hasattr(e, 'code') and e.code == 429:
+                logger.warning(f"429 Too Many Requests for AP {mac or name}, backing off for {current_delay}s")
+                time.sleep(current_delay)
+                current_delay *= backoff_factor
+            else:
+                logger.warning(f"HTTP error for AP {mac or name}: {e}")
+                break
+        except Exception as e:
+            logger.warning(f"Error fetching /clients/count for AP {mac or name}: {e}")
+            break
+        attempt += 1
+    logger.error(f"Failed to fetch /clients/count for AP {mac or name} after {retries} attempts")
+    return None
 
 def fetch_clients_count_by_site(auth_manager, site_id, retries=3):
     """Fetch client count for a specific site from the DNA Center API."""
@@ -678,7 +751,6 @@ def fetch_clients_count_by_site(auth_manager, site_id, retries=3):
                 return {}
             time.sleep(2 ** attempt)
 
-
 def fetch_site_health_summaries(auth_manager, retries=3):
     """Fetch site health summaries from the DNA Center API."""
     token = auth_manager.get_token()
@@ -699,7 +771,6 @@ def fetch_site_health_summaries(auth_manager, retries=3):
                 return []
             time.sleep(2 ** attempt)
 
-
 def fetch_network_devices(auth_manager, retries=3):
     """Fetch network devices (APs) from the DNA Center API."""
     token = auth_manager.get_token()
@@ -718,42 +789,6 @@ def fetch_network_devices(auth_manager, retries=3):
             if attempt >= retries:
                 logger.error(f"Failed to fetch network devices after {retries} attempts: {e}")
                 return []
-            time.sleep(2 ** attempt)
-
-
-def fetch_clients_count_for_ap(auth_manager, mac=None, name=None, retries=3):
-    """
-    Fetch client count for a specific AP using /clients/count with macAddress or connectedNetworkDeviceName.
-    Returns the count if found, else None. Logs the raw response for debugging.
-    """
-    token = auth_manager.get_token()
-    auth_headers = {'x-auth-token': token}
-    params = {}
-    if mac:
-        params['macAddress'] = mac
-    if name:
-        params['connectedNetworkDeviceName'] = name
-    url = f"{BASE_URL}/dna/data/api/v1/clients/count?" + urlencode(params)
-    attempt = 0
-    while attempt < retries:
-        try:
-            req = Request(url, headers=auth_headers)
-            with urlopen(req, context=ssl_context, timeout=30) as response:
-                data = json.load(response)
-                logger.debug(f"/clients/count response for AP {mac or name}: {data}")
-                if isinstance(data, dict) and 'response' in data and 'count' in data['response']:
-                    return data['response']['count']
-                elif isinstance(data, dict) and 'count' in data:
-                    return data['count']
-                else:
-                    logger.warning(f"Unexpected /clients/count response for AP {mac or name}: {data}")
-                    return None
-        except Exception as e:
-            attempt += 1
-            logger.warning(f"Error fetching /clients/count for AP {mac or name} (attempt {attempt}): {e}")
-            if attempt >= retries:
-                logger.error(f"Failed to fetch /clients/count for AP {mac or name} after {retries} attempts: {e}")
-                return None
             time.sleep(2 ** attempt)
 
 def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
@@ -883,7 +918,7 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
                     break
         # 7. Fallback: /clients/count for this AP (last resort)
         if not merged['clientCount']:
-            count = fetch_clients_count_for_ap(auth_manager, mac=mac, name=merged.get('name'))
+            count = fetch_clients_count_for_ap(auth_manager, mac=mac, name=merged.get('name'), site_id=site_id)
             debug_info['tried']['clients_count'] = True
             debug_info['raw']['clients_count'] = count
             if count is not None:

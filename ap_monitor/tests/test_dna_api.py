@@ -2,9 +2,10 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
-from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data, fetch_ap_client_data_with_fallback
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, parse_qs
+from ap_monitor.app.dna_api import AuthManager, fetch_client_counts, fetch_ap_data, get_ap_data, fetch_ap_client_data_with_fallback, fetch_clients, fetch_clients_count_for_ap, SITE_HIERARCHY
+import logging
 
 
 @patch("ap_monitor.app.dna_api.urlopen")
@@ -902,67 +903,66 @@ def test_fetch_ap_client_data_with_fallback_incomplete(mock_urlopen):
         # Pass if diagnostics are called, or if there are no APs to diagnose
         assert mock_diag.called or len(results) == 0
 
-def test_fetch_clients_requires_site_id():
-    from ap_monitor.app.dna_api import fetch_clients
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_requires_site_id(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
-    # Should not raise because default is set
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = b'{"response": []}'
+    mock_urlopen.return_value = mock_response
     result = fetch_clients(auth_manager, page_limit=1)
     assert isinstance(result, list)
 
-def test_fetch_clients_with_site_id(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_with_site_id(mock_urlopen):
+    logging.basicConfig(level=logging.DEBUG)
+    logger = logging.getLogger("test_fetch_clients_with_site_id")
+    logger.info("Starting test_fetch_clients_with_site_id")
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
     responses = [
-        {"response": [{"macAddress": "AA:BB:CC:DD:EE:FF"}]},  # First page
-        {"response": []}  # Second page, signals end
+        {"response": [{"macAddress": "AA:BB:CC:DD:EE:FF"}]},
+        {"response": []}
     ]
-    def mock_urlopen(req, context=None, timeout=None):
+    def side_effect(req, context=None, timeout=None):
+        logger.info(f"Mock urlopen called with URL: {getattr(req, 'full_url', req)}")
         class MockResponse:
             def __enter__(self):
                 class Dummy:
                     def read(self_inner):
+                        logger.info(f"Returning mock response: {responses[0]}")
                         return json.dumps(responses.pop(0)).encode()
                 return Dummy()
             def __exit__(self, exc_type, exc_val, exc_tb):
                 pass
         return MockResponse()
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
+    mock_urlopen.side_effect = side_effect
+    logger.info("Calling fetch_clients...")
     result = fetch_clients(auth_manager, site_id="e77b6e96-3cd3-400a-9ebd-231c827fd369", page_limit=1)
+    logger.info(f"fetch_clients returned: {result}")
     assert isinstance(result, list)
     assert result[0]["macAddress"] == "AA:BB:CC:DD:EE:FF"
 
-def test_fetch_clients_count_for_ap_with_site_id(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients_count_for_ap
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_count_for_ap_with_site_id(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
-    def mock_urlopen(req, context=None, timeout=None):
-        class MockResponse:
-            def __enter__(self):
-                class Dummy:
-                    def read(self_inner):
-                        return json.dumps({"response": {"count": 5}}).encode()
-                return Dummy()
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                pass
-        return MockResponse()
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value.read.return_value = json.dumps({"response": {"count": 5}}).encode()
+    mock_urlopen.return_value = mock_response
     count = fetch_clients_count_for_ap(auth_manager, mac="AA:BB:CC:DD:EE:FF", site_id="e77b6e96-3cd3-400a-9ebd-231c827fd369")
     assert count == 5
 
-def test_fetch_clients_count_for_ap_429(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients_count_for_ap
-    from urllib.error import HTTPError
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_count_for_ap_429(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
-    # Simulate 2x 429 errors, then a success
     responses = [
         HTTPError(url=None, code=429, msg="Too Many Requests", hdrs=None, fp=None),
         HTTPError(url=None, code=429, msg="Too Many Requests", hdrs=None, fp=None),
         {"response": {"count": 7}}
     ]
-    def mock_urlopen(req, context=None, timeout=None):
+    def side_effect(req, context=None, timeout=None):
         resp = responses.pop(0)
         if isinstance(resp, HTTPError):
             raise resp
@@ -975,30 +975,27 @@ def test_fetch_clients_count_for_ap_429(monkeypatch):
             def __exit__(self, exc_type, exc_val, exc_tb):
                 pass
         return MockResponse()
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
-    monkeypatch.setattr("time.sleep", lambda s: None)  # avoid real sleep
-    count = fetch_clients_count_for_ap(auth_manager, mac="AA:BB:CC:DD:EE:FF", retries=5, delay=0.1)
+    mock_urlopen.side_effect = side_effect
+    with patch("time.sleep", lambda s: None):
+        count = fetch_clients_count_for_ap(auth_manager, mac="AA:BB:CC:DD:EE:FF", retries=5, delay=0.1)
     assert count == 7
 
-def test_fetch_clients_count_for_ap_429_all_fail(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients_count_for_ap
-    from urllib.error import HTTPError
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_count_for_ap_429_all_fail(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
-    # Simulate 5x 429 errors, always fail
     responses = [HTTPError(url=None, code=429, msg="Too Many Requests", hdrs=None, fp=None)] * 5
-    def mock_urlopen(req, context=None, timeout=None):
+    def side_effect(req, context=None, timeout=None):
         resp = responses.pop(0)
         if isinstance(resp, HTTPError):
             raise resp
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    count = fetch_clients_count_for_ap(auth_manager, mac="AA:BB:CC:DD:EE:FF", retries=5, delay=0.1)
+    mock_urlopen.side_effect = side_effect
+    with patch("time.sleep", lambda s: None):
+        count = fetch_clients_count_for_ap(auth_manager, mac="AA:BB:CC:DD:EE:FF", retries=5, delay=0.1)
     assert count is None
 
-def test_fetch_clients_uses_siteHierarchy(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients, SITE_HIERARCHY
-    from urllib.parse import urlparse, parse_qs
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_uses_siteHierarchy(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"
     called_urls = []
@@ -1006,7 +1003,7 @@ def test_fetch_clients_uses_siteHierarchy(monkeypatch):
         {"response": [{"macAddress": "AA:BB:CC:DD:EE:FF"}]},
         {"response": []}
     ]
-    def mock_urlopen(req, context=None, timeout=None):
+    def side_effect(req, context=None, timeout=None):
         called_urls.append(req.full_url)
         class MockResponse:
             def __enter__(self):
@@ -1017,18 +1014,17 @@ def test_fetch_clients_uses_siteHierarchy(monkeypatch):
             def __exit__(self, exc_type, exc_val, exc_tb):
                 pass
         return MockResponse()
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    fetch_clients(auth_manager)
+    mock_urlopen.side_effect = side_effect
+    with patch("time.sleep", lambda s: None):
+        fetch_clients(auth_manager)
     parsed = urlparse(called_urls[0])
     qs = parse_qs(parsed.query)
     assert qs["siteHierarchy"][0] == SITE_HIERARCHY
 
-def test_fetch_clients_count_for_ap_uses_siteHierarchy(monkeypatch):
-    from ap_monitor.app.dna_api import fetch_clients_count_for_ap, SITE_HIERARCHY
-    from urllib.parse import urlparse, parse_qs
+@patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_clients_count_for_ap_uses_siteHierarchy(mock_urlopen):
     called_urls = []
-    def mock_urlopen(req, context=None, timeout=None):
+    def side_effect(req, context=None, timeout=None):
         called_urls.append(req.full_url)
         class MockResponse:
             def __enter__(self):
@@ -1039,9 +1035,9 @@ def test_fetch_clients_count_for_ap_uses_siteHierarchy(monkeypatch):
             def __exit__(self, exc_type, exc_val, exc_tb):
                 pass
         return MockResponse()
-    monkeypatch.setattr("ap_monitor.app.dna_api.urlopen", mock_urlopen)
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    fetch_clients_count_for_ap(MagicMock(get_token=lambda: "mocked_token"), mac="AA:BB:CC:DD:EE:FF")
+    mock_urlopen.side_effect = side_effect
+    with patch("time.sleep", lambda s: None):
+        fetch_clients_count_for_ap(MagicMock(get_token=lambda: "mocked_token"), mac="AA:BB:CC:DD:EE:FF")
     parsed = urlparse(called_urls[0])
     qs = parse_qs(parsed.query)
     assert qs["siteHierarchy"][0] == SITE_HIERARCHY

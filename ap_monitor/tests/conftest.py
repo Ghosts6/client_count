@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.engine import Engine
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import ap_monitor.app.db  # Ensure db module is loaded so attributes exist for monkeypatching
 

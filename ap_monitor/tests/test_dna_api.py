@@ -941,7 +941,7 @@ def test_fetch_ap_client_data_with_fallback_ap_name_parsing(mock_urlopen):
         assert len(results) == 1
         ap = results[0]
         # Location should be set using AP name parsing
-        assert ap["location"] == "Global/Keele Campus/tel/3"
+        assert ap["location"] == "Global/Keele Campus/Victor Phillip Dahdaleh Building/3/26"
         assert ap["source_map"]["location"] == "ap_name_parsing"
         assert ap["clientCount"] == 6  # sum of radio0 and radio1
         assert ap["status"] == "ok"

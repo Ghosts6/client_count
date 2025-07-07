@@ -6,6 +6,7 @@ from ap_monitor.app.models import (
 )
 from ap_monitor.app.main import update_client_count_task
 from unittest.mock import patch, MagicMock
+from ap_monitor.app.mapping import parse_ap_name_for_location
 
 @pytest.fixture
 def test_buildings(wireless_db, apclient_db):
@@ -229,3 +230,25 @@ def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
         # Should insert a zero count for the building
         client_counts = wireless_db.query(ClientCount).filter_by(building_id=building_id).all()
         assert all(cc.client_count == 0 for cc in client_counts) 
+
+def test_parse_ap_name_for_location_examples():
+    # k388-studc-b-1 → Student Centre, Basement, 1
+    assert parse_ap_name_for_location("k388-studc-b-1") == ("Student Centre", "Basement", "1")
+    # k372-ross-6-7 → Ross Building, 6, 7
+    assert parse_ap_name_for_location("k372-ross-6-7") == ("Ross Building", "6", "7")
+    # k410-beth-r-1236 → Bethune Residence, Room, 1236
+    assert parse_ap_name_for_location("k410-beth-r-1236") == ("Bethune Residence", "Room", "1236")
+    # k367-cb-1-14 → Chemistry Building, 1, 14
+    assert parse_ap_name_for_location("k367-cb-1-14") == ("Chemistry Building", "1", "14")
+    # k389-st-r-1024 → Stong College, Room, 1024
+    assert parse_ap_name_for_location("k389-st-r-1024") == ("Stong College", "Room", "1024")
+    # k483-tel-3-26 → Victor Phillip Dahdaleh Building, 3, 26
+    assert parse_ap_name_for_location("k483-tel-3-26") == ("Victor Phillip Dahdaleh Building", "3", "26")
+    # k402-as380-r-511 → Atkinson, Room, 511
+    assert parse_ap_name_for_location("k402-as380-r-511") == ("Atkinson", "Room", "511")
+    # k383-yl-2-5 → York Lanes, 2, 5
+    assert parse_ap_name_for_location("k383-yl-2-5") == ("York Lanes", "2", "5")
+    # Not enough parts
+    assert parse_ap_name_for_location("k383-yl-2") == (None, None, None)
+    # Unknown short form
+    assert parse_ap_name_for_location("k999-unknown-b-1") == ("Unknown", "Basement", "1") 

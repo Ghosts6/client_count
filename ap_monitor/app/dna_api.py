@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from ap_monitor.app.db import APClientSessionLocal
 from ap_monitor.app.utils import setup_logging
 from ap_monitor.app.diagnostics import save_incomplete_diagnostics_from_list
+from .mapping import parse_ap_name_for_location
 
 # Load environment variables
 load_dotenv()
@@ -791,22 +792,6 @@ def fetch_network_devices(auth_manager, retries=3):
                 return []
             time.sleep(2 ** attempt)
 
-def parse_ap_name_for_location(ap_name):
-    """
-    Parse AP name like 'k483-tel-3-26' to infer building and floor.
-    Returns (building, floor) or (None, None) if not parseable.
-    """
-    if not ap_name or not isinstance(ap_name, str):
-        return None, None
-    # Example: k483-tel-3-26
-    parts = ap_name.split('-')
-    if len(parts) >= 3:
-        building = parts[1]
-        floor = parts[2]
-        return building, floor
-    return None, None
-
-
 def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
     """
     Fetch AP/client data using prioritized, extensible multi-API fallback and merging.
@@ -945,9 +930,9 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
         # If location is missing/invalid or 'default location', try to parse from AP name
         location_invalid = (not merged['location'] or merged['location'].strip().lower() in ['default location', '', 'null', 'none', 'unknown'])
         if location_invalid and merged['name']:
-            building, floor = parse_ap_name_for_location(merged['name'])
-            if building and floor:
-                merged['location'] = f"Global/Keele Campus/{building}/{floor}"
+            building, floor, ap_number = parse_ap_name_for_location(merged['name'])
+            if building and floor and ap_number:
+                merged['location'] = f"Global/Keele Campus/{building}/{floor}/{ap_number}"
                 source_map['location'] = 'ap_name_parsing'
         # --- Check for missing required fields ---
         missing_required = [f for f in required_fields if not merged.get(f)]

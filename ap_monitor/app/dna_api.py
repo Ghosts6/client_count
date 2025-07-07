@@ -791,6 +791,22 @@ def fetch_network_devices(auth_manager, retries=3):
                 return []
             time.sleep(2 ** attempt)
 
+def parse_ap_name_for_location(ap_name):
+    """
+    Parse AP name like 'k483-tel-3-26' to infer building and floor.
+    Returns (building, floor) or (None, None) if not parseable.
+    """
+    if not ap_name or not isinstance(ap_name, str):
+        return None, None
+    # Example: k483-tel-3-26
+    parts = ap_name.split('-')
+    if len(parts) >= 3:
+        building = parts[1]
+        floor = parts[2]
+        return building, floor
+    return None, None
+
+
 def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
     """
     Fetch AP/client data using prioritized, extensible multi-API fallback and merging.
@@ -885,7 +901,7 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
             merged['model'] = ap_inv.get('apModel') or ap_inv.get('model')
             merged['ipAddress'] = ap_inv.get('primaryIpAddress') or ap_inv.get('ipAddress')
             source_map.update({k: 'ap_inventory' for k in merged if merged[k]})
-        # 2. Device health
+        # 2. Device health (primary for clientCount)
         ap_h = health_by_mac.get(mac)
         if ap_h:
             merged['macAddress'] = merged['macAddress'] or ap_h.get('macAddress')
@@ -893,7 +909,8 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
             merged['location'] = merged['location'] or ap_h.get('location')
             merged['model'] = merged['model'] or ap_h.get('model')
             merged['status'] = ap_h.get('reachabilityHealth') or ap_h.get('status')
-            merged['clientCount'] = merged['clientCount'] or sum(ap_h.get('clientCount', {}).values()) if isinstance(ap_h.get('clientCount'), dict) else ap_h.get('clientCount')
+            # Always prefer device_health for clientCount if present
+            merged['clientCount'] = sum(ap_h.get('clientCount', {}).values()) if isinstance(ap_h.get('clientCount'), dict) else ap_h.get('clientCount')
             merged['ipAddress'] = merged['ipAddress'] or ap_h.get('ipAddress')
             source_map.update({k: 'device_health' for k in merged if merged[k] and k not in source_map})
         # 3. Planned APs (for mapping)
@@ -924,6 +941,14 @@ def fetch_ap_client_data_with_fallback(auth_manager, site_id=None, retries=3):
             if count is not None:
                 merged['clientCount'] = count
                 source_map['clientCount'] = 'clients_count_api'
+        # --- NEW: Fallback for default location using AP name ---
+        # If location is missing/invalid or 'default location', try to parse from AP name
+        location_invalid = (not merged['location'] or merged['location'].strip().lower() in ['default location', '', 'null', 'none', 'unknown'])
+        if location_invalid and merged['name']:
+            building, floor = parse_ap_name_for_location(merged['name'])
+            if building and floor:
+                merged['location'] = f"Global/Keele Campus/{building}/{floor}"
+                source_map['location'] = 'ap_name_parsing'
         # --- Check for missing required fields ---
         missing_required = [f for f in required_fields if not merged.get(f)]
         status = 'ok' if not missing_required else 'incomplete'

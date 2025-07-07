@@ -904,6 +904,49 @@ def test_fetch_ap_client_data_with_fallback_incomplete(mock_urlopen):
         assert mock_diag.called or len(results) == 0
 
 @patch("ap_monitor.app.dna_api.urlopen")
+def test_fetch_ap_client_data_with_fallback_ap_name_parsing(mock_urlopen):
+    """
+    Test fallback to AP name parsing for location when location is missing or 'default location'.
+    """
+    ap_config_data = [{
+        "macAddress": "11:22:33:44:55:66",
+        "apName": "k483-tel-3-26",
+        "location": "default location",
+        "apModel": "Cisco AP",
+        "primaryIpAddress": "10.0.0.2"
+    }]
+    device_health_data = [{
+        "macAddress": "11:22:33:44:55:66",
+        "name": "k483-tel-3-26",
+        "location": "default location",
+        "model": "Cisco AP",
+        "reachabilityHealth": "UP",
+        "clientCount": {"radio0": 4, "radio1": 2},
+        "ipAddress": "10.0.0.2"
+    }]
+    client_counts_data = []
+    all_clients_data = []
+    site_health_data = []
+    planned_aps_data = []
+    with patch("ap_monitor.app.dna_api.fetch_ap_config_summary", return_value=ap_config_data), \
+         patch("ap_monitor.app.dna_api.fetch_device_health", return_value=device_health_data), \
+         patch("ap_monitor.app.dna_api.fetch_all_clients_count", return_value=client_counts_data), \
+         patch("ap_monitor.app.dna_api.fetch_clients", return_value=all_clients_data), \
+         patch("ap_monitor.app.dna_api.fetch_site_health", return_value=site_health_data), \
+         patch("ap_monitor.app.dna_api.fetch_planned_aps", return_value=planned_aps_data):
+        auth_manager = MagicMock()
+        auth_manager.get_token.return_value = "mocked_token"
+        results = fetch_ap_client_data_with_fallback(auth_manager)
+        assert isinstance(results, list)
+        assert len(results) == 1
+        ap = results[0]
+        # Location should be set using AP name parsing
+        assert ap["location"] == "Global/Keele Campus/tel/3"
+        assert ap["source_map"]["location"] == "ap_name_parsing"
+        assert ap["clientCount"] == 6  # sum of radio0 and radio1
+        assert ap["status"] == "ok"
+
+@patch("ap_monitor.app.dna_api.urlopen")
 def test_fetch_clients_requires_site_id(mock_urlopen):
     auth_manager = MagicMock()
     auth_manager.get_token.return_value = "mocked_token"

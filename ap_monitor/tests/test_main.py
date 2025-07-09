@@ -886,10 +886,10 @@ def test_update_client_count_task_fallback_network_devices(apclient_db, wireless
     campus = Campus(campus_name="Test Campus")
     wireless_db.add(campus)
     wireless_db.commit()
-    building = Building(building_name="BuildingA", campus_id=campus.campus_id, latitude=0, longitude=0)
+    building = Building(building_name="Ross", campus_id=campus.campus_id, latitude=0, longitude=0)
     wireless_db.add(building)
     wireless_db.commit()
-    ap_building = ApBuilding(buildingname="BuildingA")
+    ap_building = ApBuilding(buildingname="Ross")
     apclient_db.add(ap_building)
     apclient_db.commit()
     floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 1")
@@ -898,7 +898,7 @@ def test_update_client_count_task_fallback_network_devices(apclient_db, wireless
     ap_data = {
         "macAddress": "00:11:22:33:44:55",
         "name": "AP1",
-        "location": "BuildingA/Floor 1",
+        "location": "Ross/Floor 1",
         "clientCount": 5,
         "status": "ok"
     }
@@ -912,10 +912,10 @@ def test_update_client_count_task_fallback_clients(apclient_db, wireless_db):
     campus = Campus(campus_name="Test Campus")
     wireless_db.add(campus)
     wireless_db.commit()
-    building = Building(building_name="BuildingB", campus_id=campus.campus_id, latitude=0, longitude=0)
+    building = Building(building_name="Scott Library", campus_id=campus.campus_id, latitude=0, longitude=0)
     wireless_db.add(building)
     wireless_db.commit()
-    ap_building = ApBuilding(buildingname="BuildingB")
+    ap_building = ApBuilding(buildingname="Scott Library")
     apclient_db.add(ap_building)
     apclient_db.commit()
     floor = Floor(buildingid=ap_building.buildingid, floorname="Floor 2")
@@ -924,7 +924,7 @@ def test_update_client_count_task_fallback_clients(apclient_db, wireless_db):
     ap_data = {
         "macAddress": "00:11:22:33:44:66",
         "name": "AP2",
-        "location": "BuildingB/Floor 2",
+        "location": "Scott Library/Floor 2",
         "clientCount": 2,
         "status": "fallback"
     }

@@ -62,7 +62,7 @@ SHORT_TO_FULL_BUILDING = {
     "studc": "Student Centre",
     "beth": "Bethune Residence",
     "as380": "Atkinson",
-    "tel": "Victor Phillip Dahdaleh Building",
+    "tel": "Victor Phillip Dahdaleh",
     "psci": "Petrie Science and Engineering",
     "scott": "Scott Library",
     "vanier": "Vanier College",
@@ -85,6 +85,93 @@ FLOOR_MAP = {
     "bsmt": "Basement",
     "gr": "Ground",
 }
+
+# Canonical building names from wireless_count DB (first 55 lines of building.txt)
+CANONICAL_BUILDING_NAMES = {
+    'Lab',
+    'Lassonde',
+    'Life Sciences',
+    'Lumbers',
+    'McEwen',
+    'McLaughlin College',
+    'Northwest Gate',
+    'Osgoode',
+    'PSI - Parking Structure I (BCSS)',
+    'Passy 10',
+    'Passy 12',
+    'Passy 14',
+    'Passy 16',
+    'Passy 18',
+    'Passy 2',
+    'Passy 4',
+    'Passy 6',
+    'Passy 8',
+    'Petrie Science and Engineering',
+    'Physical Resources',
+    'Pond Road Residence',
+    'Ross',
+    'School of Continuing Studies',
+    'Scott Library',
+    'Scott Religious Centre',
+    'Second Student Centre',
+    'Seymour Schulich',
+    'Sherman',
+    'Shoreham',
+    'Steacie - DataCentre040',
+    'Steacie Lab',
+    'Steacie Science and Engineering',
+    'Stedman Lecture Halls',
+    'Stong College',
+    'Stong Residence',
+    'Student Centre',
+    'Tait Mackenzie',
+    'Tatham Residence',
+    'Toronto Track and Field Centre',
+    'Vanier College',
+    'Vanier Residence',
+    'Vari Hall',
+    'Victor Phillip Dahdaleh',
+    'Victor Phillip Dahdaleh - DataCentre5028',
+    'West Office',
+    'William Small',
+    'Winters College',
+    'Winters Residence',
+    'York Lanes',
+    'York Lions Stadium',
+    'York Stadium',
+    'Anees - Test',
+    'Goldfarb Gallery',
+    'Keele Campus',
+}
+
+def normalize_building_name(name):
+    """
+    Normalize and map a building name or short form to the canonical name in the DB.
+    Returns the canonical name if found, else None.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    name = name.strip()
+    # Try direct match
+    if name in CANONICAL_BUILDING_NAMES:
+        return name
+    # Try case-insensitive match
+    for canon in CANONICAL_BUILDING_NAMES:
+        if name.lower() == canon.lower():
+            return canon
+    # Try mapping from short form
+    mapped = SHORT_TO_FULL_BUILDING.get(name.lower())
+    if mapped and mapped in CANONICAL_BUILDING_NAMES:
+        return mapped
+    # Try partial/contains match (for common variants)
+    for canon in CANONICAL_BUILDING_NAMES:
+        if name.lower() in canon.lower() or canon.lower() in name.lower():
+            return canon
+    # Try removing common suffixes/variants
+    for canon in CANONICAL_BUILDING_NAMES:
+        if name.lower().replace('building', '').strip() == canon.lower().replace('building', '').strip():
+            return canon
+    return None
 
 def parse_ap_name_for_location(ap_name):
     """

@@ -209,7 +209,7 @@ def test_missing_building_handling(wireless_db, apclient_db, test_buildings):
          patch("ap_monitor.app.main.logger") as mock_logger:
         mock_fetch.return_value = mock_ap_data
         update_client_count_task(db=apclient_db, wireless_db=wireless_db)
-        mock_logger.warning.assert_any_call("Building Extra Building not found in wireless_count database")
+        mock_logger.warning.assert_any_call("Skipping AP Extra AP due to unmapped building name: Extra Building")
 
 def test_building_with_no_aps(wireless_db, apclient_db, test_buildings):
     """Test that buildings with no APs get zero counts."""
@@ -242,8 +242,8 @@ def test_parse_ap_name_for_location_examples():
     assert parse_ap_name_for_location("k367-cb-1-14") == ("Chemistry Building", "1", "14")
     # k389-st-r-1024 → Stong College, Room, 1024
     assert parse_ap_name_for_location("k389-st-r-1024") == ("Stong College", "Room", "1024")
-    # k483-tel-3-26 → Victor Phillip Dahdaleh Building, 3, 26
-    assert parse_ap_name_for_location("k483-tel-3-26") == ("Victor Phillip Dahdaleh Building", "3", "26")
+    # k483-tel-3-26 → Victor Phillip Dahdaleh, 3, 26
+    assert parse_ap_name_for_location("k483-tel-3-26") == ("Victor Phillip Dahdaleh", "3", "26")
     # k402-as380-r-511 → Atkinson, Room, 511
     assert parse_ap_name_for_location("k402-as380-r-511") == ("Atkinson", "Room", "511")
     # k383-yl-2-5 → York Lanes, 2, 5
@@ -252,3 +252,25 @@ def test_parse_ap_name_for_location_examples():
     assert parse_ap_name_for_location("k383-yl-2") == (None, None, None)
     # Unknown short form
     assert parse_ap_name_for_location("k999-unknown-b-1") == ("Unknown", "Basement", "1") 
+
+def test_normalize_building_name():
+    from ap_monitor.app.mapping import normalize_building_name
+    # Direct canonical names
+    assert normalize_building_name('Ross') == 'Ross'
+    assert normalize_building_name('Scott Library') == 'Scott Library'
+    # Case-insensitive
+    assert normalize_building_name('ross') == 'Ross'
+    assert normalize_building_name('scott library') == 'Scott Library'
+    # Short forms
+    assert normalize_building_name('st') == 'Stong College'
+    assert normalize_building_name('yl') == 'York Lanes'
+    assert normalize_building_name('tel') == 'Victor Phillip Dahdaleh'
+    # Common variants
+    assert normalize_building_name('Ross Building') == 'Ross'
+    assert normalize_building_name('Victor Phillip Dahdaleh Building') == 'Victor Phillip Dahdaleh'
+    # Suffix/variant
+    assert normalize_building_name('Stong College Building') == 'Stong College'
+    # Partial/contains
+    assert normalize_building_name('Scott') == 'Scott Library'
+    # Unmappable
+    assert normalize_building_name('Nonexistent Building') is None 

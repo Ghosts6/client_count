@@ -53,6 +53,7 @@ from .diagnostics import (
     is_diagnostics_enabled,
     get_incomplete_diagnostics
 )
+from ap_monitor.app.mapping import parse_ap_name_for_location, normalize_building_name
 
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
@@ -403,9 +404,14 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             if not building_name or not floor_name:
                 logger.warning(f"Skipping AP {ap_name} due to invalid location: {location}")
                 continue
-            building = db.query(ApBuilding).filter_by(buildingname=building_name).first()
+            # --- Normalize building name to canonical DB name ---
+            canonical_building_name = normalize_building_name(building_name)
+            if not canonical_building_name:
+                logger.warning(f"Skipping AP {ap_name} due to unmapped building name: {building_name}")
+                continue
+            building = db.query(ApBuilding).filter_by(buildingname=canonical_building_name).first()
             if not building:
-                building = ApBuilding(buildingname=building_name)
+                building = ApBuilding(buildingname=canonical_building_name)
                 db.add(building)
                 db.flush()
             floor = db.query(Floor).filter_by(floorname=floor_name, buildingid=building.buildingid).first()
@@ -435,8 +441,8 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             count = ap.get('clientCount', 0)
             if isinstance(count, dict):
                 count = sum(count.values())
-            building_totals.setdefault(building_name, 0)
-            building_totals[building_name] += count or 0
+            building_totals.setdefault(canonical_building_name, 0)
+            building_totals[canonical_building_name] += count or 0
             # Insert/update ClientCountAP for radio0 (fallback)
             radio = db.query(RadioType).filter_by(radioname='radio0').first()
             if radio:
@@ -457,7 +463,11 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                     db.add(cc)
         # --- Update wireless_count DB with building totals ---
         for building_name, total_clients in building_totals.items():
-            building = wireless_buildings.get(building_name.lower())
+            canonical_building_name = normalize_building_name(building_name)
+            if not canonical_building_name:
+                logger.warning(f"Skipping update for unmapped building name: {building_name}")
+                continue
+            building = wireless_buildings.get(canonical_building_name.lower())
             if building:
                 client_count = ClientCount(
                     building_id=building.building_id,
@@ -465,9 +475,9 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
                     time_inserted=now
                 )
                 wireless_db.add(client_count)
-                logger.info(f"Updated client count for building {building_name}: {total_clients}")
+                logger.info(f"Updated client count for building {canonical_building_name}: {total_clients}")
             else:
-                logger.warning(f"Building {building_name} not found in wireless_count database")
+                logger.warning(f"Building {canonical_building_name} not found in wireless_count database")
         for building_name, building in wireless_buildings.items():
             if building_name.lower() not in {k.lower() for k in building_totals}:
                 client_count = ClientCount(

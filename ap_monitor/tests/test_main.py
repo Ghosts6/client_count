@@ -986,4 +986,26 @@ def test_update_client_count_task_fallback_none(apclient_db, wireless_db):
         result = wireless_db.query(ClientCount).all()
         assert len(result) == 0
 
+def test_update_ap_data_task_without_db(monkeypatch):
+    """Test update_ap_data_task creates and closes its own DB session if none is provided."""
+    # Mock fetch_ap_data_func to return minimal valid AP data
+    mock_ap_data = [{
+        "name": "TestAP",
+        "macAddress": "00:11:22:33:44:55",
+        "ipAddress": "192.168.1.100",
+        "model": "ModelX",
+        "reachabilityHealth": "UP",
+        "location": "Test Building/Floor 1",
+        "clientCount": {"radio0": 5, "radio1": 3}
+    }]
+    def mock_fetch_ap_data(auth_manager_obj, rounded_unix_timestamp):
+        return mock_ap_data
+    # Patch time.sleep to avoid real waiting
+    monkeypatch.setattr("time.sleep", lambda x: None)
+    # Call the function without db argument
+    try:
+        update_ap_data_task(db=None, auth_manager_obj=None, fetch_ap_data_func=mock_fetch_ap_data, retries=0)
+    except Exception as e:
+        pytest.fail(f"update_ap_data_task raised an exception when called without db: {e}")
+
 

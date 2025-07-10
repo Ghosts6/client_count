@@ -237,10 +237,14 @@ def parse_location(location: str) -> tuple:
 
 def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None, retries=0):
     """Background task to update AP data in the database, with retry on maintenance errors."""
+    from ap_monitor.app.db import get_apclient_db_session
     auth_manager_obj = auth_manager_obj or auth_manager
     fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
     MAX_RETRIES = 3
+    if db is None:
+        db = get_apclient_db_session()
+        close_db = True
     try:
         logger.info(f"Running scheduled task: update_ap_data_task (retry {retries})")
         logger.debug(f"Database session being used: {db}")
@@ -350,7 +354,7 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         logger.error(f"Error updating AP data: {e}")
         raise  # Re-raise to trigger scheduler's error handling
     finally:
-        if close_db:
+        if close_db and db:
             db.close()
         next_run = calculate_next_run_time()
         reschedule_job("update_ap_data_task", update_ap_data_task, next_run)

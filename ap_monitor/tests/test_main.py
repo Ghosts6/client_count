@@ -412,18 +412,37 @@ def raise_http_500(*args, **kwargs):
     from urllib.error import HTTPError
     raise HTTPError(url=None, code=500, msg="Internal Server Error", hdrs=None, fp=None)
 
-def test_update_ap_data_task_retries_on_maintenance(monkeypatch, caplog):
-    # Patch time.sleep to avoid real waiting
-    monkeypatch.setattr("time.sleep", lambda x: None)
+import ap_monitor.app.main as main_module
+
+def test_update_ap_data_task_sets_global_maintenance(monkeypatch, caplog):
     # Patch db session
     mock_db = Mock()
+    # Reset global maintenance window
+    main_module.MAINTENANCE_UNTIL = None
     # Run the task with the mock fetch_ap_data_func that always raises HTTP 500
     with caplog.at_level("ERROR"):
-        update_ap_data_task(db=mock_db, fetch_ap_data_func=raise_http_500)
-    # Check that the error and retry messages are in the logs
-    error_logs = [r for r in caplog.records if "Maintenance window" in r.message]
-    assert len(error_logs) == 4  # Should log for all 4 attempts (0,1,2,3)
-    assert any("Max retries reached" in r.message for r in caplog.records)
+        main_module.update_ap_data_task(db=mock_db, fetch_ap_data_func=raise_http_500)
+    # Check that the maintenance window is set
+    assert main_module.MAINTENANCE_UNTIL is not None
+    # Check that the log contains the maintenance message
+    assert any("Entering maintenance until" in r.message for r in caplog.records)
+
+
+def test_update_ap_data_task_skips_during_maintenance(monkeypatch, caplog):
+    # Patch db session
+    mock_db = Mock()
+    # Set global maintenance window to the future
+    from datetime import datetime, timedelta, timezone
+    future_time = datetime.now(timezone.utc) + timedelta(minutes=30)
+    main_module.MAINTENANCE_UNTIL = future_time
+    # Patch fetch_ap_data_func to fail if called
+    def fail_fetch(*args, **kwargs):
+        pytest.fail("fetch_ap_data_func should not be called during maintenance window")
+    # Run the task
+    with caplog.at_level("WARNING"):
+        main_module.update_ap_data_task(db=mock_db, fetch_ap_data_func=fail_fetch)
+    # Check that the log contains the skip message
+    assert any("In maintenance window until" in r.message for r in caplog.records)
 
 @patch("ap_monitor.app.main.auth_manager")
 def test_update_ap_data_task(mock_auth, client, override_get_db_with_mock_aps):
@@ -514,7 +533,7 @@ def test_reschedule_job(mock_scheduler):
     assert call_args["replace_existing"] is True
 
 def test_update_ap_data_task_success(mock_db, mock_auth_manager):
-    """Test successful AP data update task."""
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
     mock_ap_data = [
         {
             "deviceName": "test_ap",
@@ -525,20 +544,20 @@ def test_update_ap_data_task_success(mock_db, mock_auth_manager):
     ]
 
     with patch("ap_monitor.app.main.fetch_ap_data", return_value=mock_ap_data):
-        update_ap_data_task(mock_db, mock_auth_manager)
+        main_module.update_ap_data_task(mock_db, mock_auth_manager)
         mock_db.commit.assert_called_once()
         mock_db.rollback.assert_not_called()
 
 def test_update_ap_data_task_failure(mock_db, mock_auth_manager):
-    """Test AP data update task with error handling."""
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
     with patch("ap_monitor.app.main.fetch_ap_data", side_effect=Exception("API Error")):
         with pytest.raises(Exception):
-            update_ap_data_task(mock_db, mock_auth_manager)
+            main_module.update_ap_data_task(mock_db, mock_auth_manager)
         mock_db.rollback.assert_called_once()
         mock_db.commit.assert_not_called()
 
 def test_update_client_count_task_success(mock_db, mock_auth_manager, wireless_db):
-    """Test successful client count update task."""
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
     mock_ap_data = [
         {
             "macAddress": "00:11:22:33:44:55",
@@ -550,7 +569,7 @@ def test_update_client_count_task_success(mock_db, mock_auth_manager, wireless_d
     ]
     with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
         mock_fetch.return_value = mock_ap_data
-        update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
+        main_module.update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
         mock_db.commit.assert_called_once()
 
 @pytest.mark.parametrize("mock_ap_data,expected_status,expect_commit", [
@@ -560,20 +579,20 @@ def test_update_client_count_task_success(mock_db, mock_auth_manager, wireless_d
     ([], None, False),
 ])
 def test_update_client_count_task_fallback_cases(mock_db, mock_auth_manager, wireless_db, mock_ap_data, expected_status, expect_commit):
-    """Test client count update task with various fallback scenarios."""
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
     with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback") as mock_fetch:
         mock_fetch.return_value = mock_ap_data
-        update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
+        main_module.update_client_count_task(mock_db, mock_auth_manager, wireless_db=wireless_db)
         if expect_commit:
             mock_db.commit.assert_called()
         else:
             mock_db.commit.assert_not_called()
 
 def test_update_client_count_task_failure(mock_db, mock_auth_manager):
-    """Test client count update task with error handling."""
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
     with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback", side_effect=Exception("API Error")) as mock_fetch:
         with pytest.raises(Exception):
-            update_client_count_task(mock_db, mock_auth_manager)
+            main_module.update_client_count_task(mock_db, mock_auth_manager)
         mock_db.rollback.assert_called_once()
         mock_db.commit.assert_not_called()
 

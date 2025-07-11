@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
 
 import ap_monitor.app.db  # Ensure db module is loaded so attributes exist for monkeypatching
+import ap_monitor.app.main as main_module
 
 from ap_monitor.app.models import (
     AccessPoint, ClientCount, Building, Floor, Campus,
@@ -147,3 +148,7 @@ def client(wireless_db, apclient_db, scheduler):
         yield test_client
     
     app.dependency_overrides.clear()
+
+@pytest.fixture(autouse=True)
+def reset_maintenance_window():
+    main_module.MAINTENANCE_UNTIL = None

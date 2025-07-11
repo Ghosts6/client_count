@@ -73,6 +73,9 @@ scheduler = BackgroundScheduler(
 # Create auth manager for DNA Center API
 auth_manager = AuthManager()
 
+# Global maintenance window variable
+MAINTENANCE_UNTIL = None
+
 def cleanup_job(job_id, scheduler_obj=None):
     """Clean up a job and its instances."""
     scheduler_obj = scheduler_obj or scheduler
@@ -238,17 +241,23 @@ def parse_location(location: str) -> tuple:
 def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data_func=None, retries=0):
     """Background task to update AP data in the database, with retry on maintenance errors."""
     from ap_monitor.app.db import get_apclient_db_session
+    global MAINTENANCE_UNTIL
     auth_manager_obj = auth_manager_obj or auth_manager
     fetch_ap_data_func = fetch_ap_data_func or fetch_ap_data
     close_db = False
-    MAX_RETRIES = 3
     if db is None:
         db = get_apclient_db_session()
         close_db = True
     try:
+        # Check for global maintenance window
+        now = datetime.now(timezone.utc)
+        if MAINTENANCE_UNTIL and now < MAINTENANCE_UNTIL:
+            logger.warning(f"In maintenance window until {MAINTENANCE_UNTIL.isoformat()}, skipping update_ap_data_task.")
+            next_run = MAINTENANCE_UNTIL
+            reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
+            return
         logger.info(f"Running scheduled task: update_ap_data_task (retry {retries})")
         logger.debug(f"Database session being used: {db}")
-        now = datetime.now(timezone.utc)
         rounded_unix_timestamp = int(now.timestamp() * 1000)
         aps = fetch_ap_data_func(auth_manager_obj, rounded_unix_timestamp)
         logger.info(f"Fetched {len(aps)} APs from DNAC API")
@@ -337,13 +346,12 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
         
     except HTTPError as e:
         if e.code in (404, 500):
-            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Sleeping for 30 minutes before retry.")
-            if retries < MAX_RETRIES:
-                time.sleep(1800)  # 30 minutes
-                update_ap_data_task(db=None, auth_manager_obj=auth_manager_obj, fetch_ap_data_func=fetch_ap_data_func, retries=retries+1)
-                return
-            else:
-                logger.error(f"Max retries reached for update_ap_data_task. Skipping this run.")
+            # Set global maintenance window for 1 hour
+            MAINTENANCE_UNTIL = datetime.now(timezone.utc) + timedelta(hours=1)
+            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Entering maintenance until {MAINTENANCE_UNTIL.isoformat()}.")
+            next_run = MAINTENANCE_UNTIL
+            reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
+            return
         if db:
             db.rollback()
         logger.error(f"Error updating AP data: {e}")
@@ -356,23 +364,31 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
     finally:
         if close_db and db:
             db.close()
-        next_run = calculate_next_run_time()
-        reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
+        # Only reschedule if not in maintenance
+        if not (MAINTENANCE_UNTIL and datetime.now(timezone.utc) < MAINTENANCE_UNTIL):
+            next_run = calculate_next_run_time()
+            reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
 
 def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_client_counts_func=None, fetch_ap_data_func=None, wireless_db=None, retries=0):
     """Update client count data from DNA Center API, with retry on maintenance errors."""
+    global MAINTENANCE_UNTIL
     close_db = False
     close_wireless_db = False
-    MAX_RETRIES = 3
     try:
+        # Check for global maintenance window
+        now = datetime.now(timezone.utc)
+        if MAINTENANCE_UNTIL and now < MAINTENANCE_UNTIL:
+            logger.warning(f"In maintenance window until {MAINTENANCE_UNTIL.isoformat()}, skipping update_client_count_task.")
+            next_run = MAINTENANCE_UNTIL
+            reschedule_job("update_client_count_task", update_client_count_task, next_run)
+            return
         # Get database sessions if not provided
         if db is None:
             db = get_apclient_db_session()
-        close_db = True
+            close_db = True
         if wireless_db is None:
             wireless_db = get_wireless_db_session()
-        close_wireless_db = True
-        now = datetime.now(timezone.utc)
+            close_wireless_db = True
         rounded_unix_timestamp = int(now.timestamp())
         auth_manager_obj = auth_manager_obj or auth_manager
         # Use new fallback logic for fetching AP/client data
@@ -498,13 +514,12 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             logger.warning(f"{len(incomplete_aps)} APs were incomplete and may need further data recovery. See logs for details.")
     except HTTPError as e:
         if e.code in (404, 500):
-            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Sleeping for 30 minutes before retry.")
-            if retries < MAX_RETRIES:
-                time.sleep(1800)  # 30 minutes
-                update_client_count_task(db=None, auth_manager_obj=auth_manager_obj, fetch_client_counts_func=fetch_client_counts_func, fetch_ap_data_func=fetch_ap_data_func, wireless_db=None, retries=retries+1)
-                return
-            else:
-                logger.error(f"Max retries reached for update_client_count_task. Skipping this run.")
+            # Set global maintenance window for 1 hour
+            MAINTENANCE_UNTIL = datetime.now(timezone.utc) + timedelta(hours=1)
+            logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Entering maintenance until {MAINTENANCE_UNTIL.isoformat()}.")
+            next_run = MAINTENANCE_UNTIL
+            reschedule_job("update_client_count_task", update_client_count_task, next_run)
+            return
         if db:
             db.rollback()
         if wireless_db:
@@ -523,8 +538,10 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             db.close()
         if close_wireless_db and wireless_db:
             wireless_db.close()
-        next_run = calculate_next_run_time()
-        reschedule_job("update_client_count_task", update_client_count_task, next_run)
+        # Only reschedule if not in maintenance
+        if not (MAINTENANCE_UNTIL and datetime.now(timezone.utc) < MAINTENANCE_UNTIL):
+            next_run = calculate_next_run_time()
+            reschedule_job("update_client_count_task", update_client_count_task, next_run)
 
 def insert_apclientcount_data(device_info_list, timestamp, session=None):
     """Insert AP client count data into the database."""

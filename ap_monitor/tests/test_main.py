@@ -1005,6 +1005,22 @@ def test_update_client_count_task_fallback_none(apclient_db, wireless_db):
         result = wireless_db.query(ClientCount).all()
         assert len(result) == 0
 
+def test_update_client_count_task_dict_response(mock_db, mock_auth_manager, caplog):
+    """
+    Test update_client_count_task handles the case where fetch_ap_client_data_with_fallback returns a dict (API error/rate limit).
+    Should log the error and return early without processing or committing.
+    """
+    import ap_monitor.app.main as main_module
+    main_module.MAINTENANCE_UNTIL = None  # Ensure not in maintenance
+    error_dict = {"error": "API rate limit", "status": 429}
+    with patch("ap_monitor.app.main.fetch_ap_client_data_with_fallback", return_value=error_dict) as mock_fetch:
+        with caplog.at_level("ERROR"):
+            main_module.update_client_count_task(mock_db, mock_auth_manager)
+            # Should log the error about dict response
+            assert any("fetch_ap_client_data_with_fallback returned a dict" in r for r in caplog.text.splitlines())
+        mock_db.commit.assert_not_called()
+        mock_db.rollback.assert_not_called()
+
 def test_update_ap_data_task_without_db(monkeypatch):
     """Test update_ap_data_task creates and closes its own DB session if none is provided."""
     # Mock fetch_ap_data_func to return minimal valid AP data

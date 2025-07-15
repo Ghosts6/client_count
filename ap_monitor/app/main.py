@@ -55,6 +55,33 @@ from .diagnostics import (
 )
 from ap_monitor.app.mapping import parse_ap_name_for_location, normalize_building_name
 
+# --- API Health Tracking ---
+from collections import deque
+import threading
+
+API_ERROR_HISTORY = deque(maxlen=100)  # Track last 100 API errors
+API_ERROR_LOCK = threading.Lock()
+
+def log_api_error(error_type, message):
+    with API_ERROR_LOCK:
+        API_ERROR_HISTORY.append({
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'type': error_type,
+            'message': str(message)
+        })
+
+def get_api_error_summary():
+    with API_ERROR_LOCK:
+        errors = list(API_ERROR_HISTORY)
+    now = datetime.now(timezone.utc)
+    one_hour_ago = now - timedelta(hours=1)
+    recent_errors = [e for e in errors if datetime.fromisoformat(e['timestamp']) > one_hour_ago]
+    return {
+        'total_errors_tracked': len(errors),
+        'errors_last_hour': len(recent_errors),
+        'recent_errors': recent_errors[-10:]  # Show last 10 errors
+    }
+
 TORONTO_TZ = ZoneInfo("America/Toronto")
 
 # Set up logging first
@@ -349,17 +376,20 @@ def update_ap_data_task(db: Session = None, auth_manager_obj=None, fetch_ap_data
             # Set global maintenance window for 1 hour
             MAINTENANCE_UNTIL = datetime.now(timezone.utc) + timedelta(hours=1)
             logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Entering maintenance until {MAINTENANCE_UNTIL.isoformat()}.")
+            log_api_error("HTTPError", f"Maintenance window or server error (HTTP {e.code}): {e}")
             next_run = MAINTENANCE_UNTIL
             reschedule_job("update_ap_data_task", update_ap_data_task, next_run)
             return
         if db:
             db.rollback()
         logger.error(f"Error updating AP data: {e}")
+        log_api_error("HTTPError", e)
         # Do not re-raise, just log and continue to reschedule
     except Exception as e:
         if db:
             db.rollback()
         logger.error(f"Error updating AP data: {e}")
+        log_api_error("Exception", e)
         raise  # Re-raise to trigger scheduler's error handling
     finally:
         if close_db and db:
@@ -393,11 +423,17 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         auth_manager_obj = auth_manager_obj or auth_manager
         # Use new fallback logic for fetching AP/client data
         ap_data_list = fetch_ap_client_data_with_fallback(auth_manager_obj)
+        if isinstance(ap_data_list, dict):
+            logger.error("fetch_ap_client_data_with_fallback returned a dict (likely API error or rate limit): %r", ap_data_list)
+            log_api_error("APIError", ap_data_list)
+            return
         if not isinstance(ap_data_list, list):
             logger.error("fetch_ap_client_data_with_fallback did not return a list! Got: %s", type(ap_data_list))
+            log_api_error("APIError", f"Type: {type(ap_data_list)} Value: {ap_data_list}")
             return
         if not ap_data_list:
             logger.error("No AP/client data available from any endpoint. Skipping update.")
+            log_api_error("APIError", "No AP/client data available from any endpoint.")
             return
         building_totals = {}
         wireless_buildings = {b.building_name.lower(): b for b in wireless_db.query(Building).all()}
@@ -517,6 +553,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
             # Set global maintenance window for 1 hour
             MAINTENANCE_UNTIL = datetime.now(timezone.utc) + timedelta(hours=1)
             logger.error(f"Maintenance window or server error detected (HTTP {e.code}). Entering maintenance until {MAINTENANCE_UNTIL.isoformat()}.")
+            log_api_error("HTTPError", f"Maintenance window or server error (HTTP {e.code}): {e}")
             next_run = MAINTENANCE_UNTIL
             reschedule_job("update_client_count_task", update_client_count_task, next_run)
             return
@@ -525,6 +562,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         if wireless_db:
             wireless_db.rollback()
         logger.error(f"Error updating client count data: {str(e)}")
+        log_api_error("HTTPError", e)
         # Do not re-raise, just log and continue to reschedule
     except Exception as e:
         if db:
@@ -532,6 +570,7 @@ def update_client_count_task(db: Session = None, auth_manager_obj=None, fetch_cl
         if wireless_db:
             wireless_db.rollback()
         logger.error(f"Error updating client count data: {str(e)}")
+        log_api_error("Exception", e)
         raise
     finally:
         if close_db and db:
@@ -1146,3 +1185,11 @@ async def get_incomplete_devices():
         raise HTTPException(status_code=403, detail="Diagnostics are not enabled. Set ENABLE_DIAGNOSTICS=true to enable.")
     data = get_incomplete_diagnostics()
     return {"incomplete_devices": data, "count": len(data)}
+
+@app.get("/diagnostics/api_health", tags=["Diagnostics"])
+def get_api_health():
+    """
+    Get a summary of recent API error rates and details. Tracks the last 100 API errors in memory.
+    Returns total errors tracked, errors in the last hour, and the 10 most recent errors.
+    """
+    return get_api_error_summary()

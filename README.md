@@ -268,6 +268,32 @@ curl -i http://localhost:8000/diagnostics/report
 curl -i http://localhost:8000/diagnostics/incomplete-devices
 ```
 
+#### **API Health Diagnostics**
+
+- **Endpoint**: `GET /diagnostics/api_health`
+- **Description**: Returns a summary of recent API error rates and details. Tracks the last 100 API errors (in memory, not persisted across restarts).
+- **Response:**
+```
+{
+  "total_errors_tracked": 12,
+  "errors_last_hour": 3,
+  "recent_errors": [
+    {
+      "timestamp": "2025-07-11T16:50:08.360339+00:00",
+      "type": "APIError",
+      "message": "No AP/client data available from any endpoint."
+    },
+    ...
+  ]
+}
+```
+- `total_errors_tracked`: Number of errors currently tracked (max 100).
+- `errors_last_hour`: Number of errors in the last hour.
+- `recent_errors`: The 10 most recent errors (timestamp, type, message).
+- **Usage:**
+  - `GET /diagnostics/api_health`
+  - Useful for monitoring API health, rate limits, and diagnosing external API issues.
+
 ### **OpenAPI Documentation**
 
 - **Endpoint**: `GET /openapi.json` and `/docs`

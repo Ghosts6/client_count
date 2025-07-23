@@ -4,15 +4,14 @@
 
 ---
 
-## **Features**
-
-- **Data Collection**: Fetches AP data (name, status, client count) and client count data from Cisco DNA Center APIs.
-- **Database Integration**: Stores data in a PostgreSQL database with optimized schema for querying.
-- **RESTful API**: Provides endpoints for manual updates, data retrieval, and health checks.
-- **Scheduler**: Automatically updates data every 5 minutes using APScheduler.
-- **Logging**: Logs application events and errors for debugging and auditing.
-- **Scalable Deployment**: Supports deployment using `systemd` or Docker for portability and reliability.
-- **Testing**: Comprehensive testing of models, APIs, and utility functions using `pytest`.
+## **How it Works**
+- **Data Collection:** Periodically fetches AP and client count data from Cisco DNA Center APIs.
+- **Database Storage:** Stores AP and client count data in a relational database (PostgreSQL in production, SQLite in tests).
+- **RESTful API:** Exposes endpoints for retrieving APs, client counts, buildings, floors, rooms, and diagnostics.
+- **Diagnostics:** Provides advanced endpoints for zero-count detection, health monitoring, incomplete device records, and API health.
+- **Manual and Scheduled Updates:** Data can be updated on a schedule (APScheduler) or manually via API.
+- **Logging:** All events and errors are logged for auditing and debugging.
+- **Testing:** Comprehensive test suite using pytest, in-memory SQLite, and mock data for fast, isolated tests.
 
 ---
 
@@ -21,11 +20,14 @@
 ```
 client_count/
 ├── ap_monitor/
+│   ├── __init__.py
 │   ├── app/
 │   │   ├── __init__.py
 │   │   ├── db.py
+│   │   ├── diagnostics.py
 │   │   ├── dna_api.py
 │   │   ├── main.py
+│   │   ├── mapping.py
 │   │   ├── models.py
 │   │   ├── schemas.py
 │   │   └── utils.py
@@ -36,7 +38,9 @@ client_count/
 │   │   ├── __init__.py
 │   │   ├── conftest.py
 │   │   ├── test_apclientcount.py
+│   │   ├── test_building_mapping.py
 │   │   ├── test_db.py
+│   │   ├── test_diagnostics.py
 │   │   ├── test_dna_api.py
 │   │   ├── test_location_parser.py
 │   │   ├── test_main.py
@@ -49,6 +53,63 @@ client_count/
 ├── pytest.ini
 ├── README.md
 ```
+
+---
+
+## **Environment Configuration**
+
+The application uses a `.env` file for configuration. This file is required for both production and testing, but **test runs override the database settings to use in-memory SQLite** for isolation and speed.
+
+Example `.env` (edit as needed):
+
+```env
+# Database Configuration
+DB_HOST=localhost
+DB_NAME=wireless_count
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_PORT=3306  
+
+APCLIENT_DB_URL=postgresql://postgres:your_password@localhost:3306/apclientcount
+
+# DNA Center API Configuration
+DNA_API_URL=https://your-dnac-host/dna/intent/api/v1/
+DNA_USERNAME=your_username
+DNA_PASSWORD=your_password
+
+# Application Configuration
+LOG_LEVEL=INFO
+ENABLE_DIAGNOSTICS=false
+```
+
+---
+
+## **Testing Environment**
+
+- **Database:** Uses **in-memory SQLite** for all tests (no real PostgreSQL required).
+- **Data:** Uses **mock data** for API and database calls to ensure tests are fast, isolated, and do not affect production data or external services.
+- **Test Runner:** Uses `pytest` for running all tests.
+- **How to Run:**
+
+```bash
+TESTING=true PYTHONPATH=ap_monitor pytest -v ap_monitor/tests/
+```
+
+- **Note:**
+  - The test suite does **not** require a running PostgreSQL instance or access to real Cisco DNA Center APIs.
+  - All database and API interactions are mocked or use in-memory data.
+
+---
+
+## **Production Environment**
+
+- **Database:** Uses **PostgreSQL** for persistent, real data storage.
+- **Data:** Connects to **real Cisco DNA Center APIs** for live data.
+- **Virtual Environment:** Runs in a Python `venv` for dependency isolation.
+- **Process Management:** Managed by `systemd` (or Docker) for reliability and automatic restarts.
+- **Logging:** Application logs are stored in the `Logs/` directory.
+- **How to Run:**
+  - Follow the setup and systemd instructions below.
 
 ---
 
@@ -319,11 +380,16 @@ Logs/ap-monitor.log
 
 The application uses `pytest` for testing. Tests are located in the `tests/` directory and cover the following areas:
 
-- **Models**: Tests for database models (`test_models.py`).
-- **APIs**: Tests for DNA Center API integration (`test_dna_api.py`).
-- **Utilities**: Tests for utility functions like logging and scheduling (`test_utils.py`).
-- **Location Parsing**: Tests for location parsing logic (`test_location_parser.py`).
-- **Application Functionality**: Tests for FastAPI endpoints and database interactions.
+- **Models:** Tests for database models (`test_models.py`).
+- **APIs:** Tests for DNA Center API integration (`test_dna_api.py`).
+- **Utilities:** Tests for utility functions like logging and scheduling (`test_utils.py`).
+- **Location Parsing:** Tests for location parsing logic (`test_location_parser.py`).
+- **Application Functionality:** Tests for FastAPI endpoints and database interactions.
+
+**Test Environment Details:**
+- All tests use **in-memory SQLite** (no PostgreSQL required).
+- All external API calls are **mocked**.
+- Tests are fast, isolated, and safe to run on any machine.
 
 To run the tests, use the following command:
 

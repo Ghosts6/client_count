@@ -183,9 +183,7 @@ pip install -r ap_monitor/requirements.txt
 Run the function that creates your tables (once):
 
 ```bash
-source venv/bin/activate
 python -c "from ap_monitor.app.db import init_db; init_db()"
-deactivate
 ```
 
 ### 7. Create a `systemd` Service
@@ -200,9 +198,9 @@ After=network.target
 [Service]
 User=statclcn
 Group=statclcn
-WorkingDirectory=/home/statclcn/client_count
-Environment="PATH=/home/statclcn/client_count/venv/bin"
-ExecStart=/home/statclcn/client_count/venv/bin/uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/path/to/project
+Environment="PATH=/path/to/venv/bin"
+ExecStart=/path/to/client_count/venv/bin/uvicorn ap_monitor.app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 

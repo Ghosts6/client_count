@@ -21,7 +21,7 @@ def setup_logging():
             df.writelines(sf)
         os.remove(source)
 
-    handler = TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=14)
+    handler = TimedRotatingFileHandler(log_file, when="D", interval=1, backupCount=7)
     handler.namer = namer
     handler.rotator = rotator
     
